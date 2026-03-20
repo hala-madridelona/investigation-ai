@@ -1,10 +1,12 @@
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
   incidents,
   investigationState,
+  stepArtifacts,
   steps,
+  toolCalls,
 } from '@investigation-ai/db';
 import { createInvestigationAdk } from './reasoning/google-adk.js';
 import {
@@ -27,6 +29,9 @@ import type {
   PlanStep,
   StructuredSignal,
   SummarizationResponse,
+  ToolExecutionRequest,
+  ToolExecutionResult,
+  ToolOutput,
 } from '@investigation-ai/shared-types';
 import {
   defaultWorkflowRetryPolicy,
@@ -76,9 +81,7 @@ const validatePlan = (input: unknown): PlanInvestigationRequest => {
   return {
     context: validateWorkflowContext(payload.context),
     incidentId: asString(payload.incidentId, 'incidentId'),
-    ...(rawMaxSteps === undefined
-      ? {}
-      : { maxSteps: rawMaxSteps as number }),
+    ...(rawMaxSteps === undefined ? {} : { maxSteps: rawMaxSteps as number }),
   };
 };
 
@@ -108,11 +111,14 @@ const validateFinalize = (input: unknown): FinalizeInvestigationRequest => {
   };
 };
 
-
 const validateWorkflowContext = (input: unknown): WorkflowRequestContext => {
   const context = asObject(input);
   const attempt = context.attempt ?? 1;
-  if (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt <= 0) {
+  if (
+    typeof attempt !== 'number' ||
+    !Number.isInteger(attempt) ||
+    attempt <= 0
+  ) {
     throw new Error('context.attempt must be a positive integer');
   }
   return {
@@ -357,6 +363,243 @@ const buildDeterministicSignals = (evidenceIds: string[]): StructuredSignal[] =>
     entityIds: [],
   }));
 
+const extractEvidenceIdsFromResults = (
+  results: ToolExecutionResult[],
+): string[] =>
+  Array.from(
+    new Set(
+      results.flatMap((result) =>
+        result.output.evidenceRefs.map((evidence) => evidence.id),
+      ),
+    ),
+  );
+
+const extractSignalsFromResults = (
+  results: ToolExecutionResult[],
+): StructuredSignal[] =>
+  results.flatMap((result) =>
+    result.output.structuredSignals.map((signal) => ({ ...signal })),
+  );
+
+const toToolStatus = (
+  status: ToolExecutionResult['status'],
+): 'success' | 'failed' => (status === 'failed' ? 'failed' : 'success');
+
+const buildStepInput = (
+  incidentId: string,
+  planStep: PlanStep,
+  state: InvestigationState,
+): JsonObject => ({
+  incidentId,
+  planStepId: planStep.id,
+  title: planStep.title,
+  objective: planStep.objective,
+  rationale: planStep.rationale,
+  targetEntityIds: planStep.targetEntityIds,
+  priorFindingSummaries: state.findings.map((finding) => finding.summary),
+  priorSignalNames: state.lastSignals.map((signal) => signal.name),
+  priorToolRequestIds: state.lastToolResults.map((result) => result.requestId),
+});
+
+const buildReasoningOutput = (
+  incidentId: string,
+  planStep: PlanStep,
+  input: JsonObject,
+): ToolOutput => ({
+  rawSummary: `${planStep.title}: ${planStep.objective}`,
+  structuredSignals: [
+    {
+      name: `${planStep.id}-reasoning-signal`,
+      category: 'correlation',
+      value: planStep.objective,
+      confidence: 0.66,
+      evidenceRefs: [`${planStep.id}-reasoning-evidence`],
+      entityIds: planStep.targetEntityIds,
+    },
+  ],
+  entities: [],
+  evidenceRefs: [
+    {
+      id: `${planStep.id}-reasoning-evidence`,
+      kind: 'report',
+      source: 'investigation-engine',
+      locator: `inline://incident/${incidentId}/plan-step/${planStep.id}/reasoning`,
+      metadata: { input },
+    },
+  ],
+  confidence: 0.66,
+  source: {
+    toolName: 'investigation-engine-reasoning',
+    toolVersion: 'v1',
+    executionId: `${planStep.id}-reasoning`,
+  },
+});
+
+const buildToolRequest = (
+  incidentId: string,
+  planStep: PlanStep,
+  state: InvestigationState,
+): ToolExecutionRequest => ({
+  id: `${planStep.id}-tool-request`,
+  incidentId,
+  stepId: planStep.id,
+  toolName: planStep.title.toLowerCase().includes('context')
+    ? 'incident-context-tool'
+    : 'signal-review-tool',
+  rationale: planStep.rationale,
+  input: buildStepInput(incidentId, planStep, state),
+  targetEntityIds: planStep.targetEntityIds,
+  evidenceRefs: extractEvidenceIdsFromResults(state.lastToolResults),
+});
+
+const buildToolOutput = (
+  request: ToolExecutionRequest,
+  state: InvestigationState,
+): ToolOutput => {
+  const evidenceId = `${request.stepId}-tool-evidence`;
+  return {
+    rawSummary: `${request.toolName} executed for ${request.stepId} and captured ${request.targetEntityIds.length || state.entities.length || 1} investigation targets.`,
+    structuredSignals: [
+      {
+        name: `${request.stepId}-tool-signal`,
+        category: request.toolName.includes('context')
+          ? 'change'
+          : 'correlation',
+        value: {
+          objective:
+            typeof request.input.objective === 'string'
+              ? request.input.objective
+              : request.stepId,
+          targetCount: request.targetEntityIds.length,
+          priorEvidenceCount: request.evidenceRefs.length,
+        },
+        confidence: 0.74,
+        evidenceRefs: [evidenceId],
+        entityIds: request.targetEntityIds,
+      },
+    ],
+    entities: [],
+    evidenceRefs: [
+      {
+        id: evidenceId,
+        kind: 'artifact',
+        source: request.toolName,
+        locator: `inline://incident/${request.incidentId}/tool/${request.id}`,
+        metadata: { input: request.input },
+      },
+    ],
+    confidence: 0.74,
+    source: {
+      toolName: request.toolName,
+      toolVersion: 'v1',
+      executionId: request.id,
+    },
+  };
+};
+
+const persistExecutionRecords = async (
+  incidentId: string,
+  executedSteps: InvestigationState['steps'],
+  resultsByStepId: Map<string, ToolExecutionResult>,
+): Promise<void> => {
+  const existingStepRecords = await database.client.query.steps.findMany({
+    columns: { id: true },
+    where: eq(steps.incidentId, incidentId),
+  });
+  const existingStepIds = existingStepRecords.map((record) => record.id);
+  if (existingStepIds.length > 0) {
+    await database.client
+      .delete(toolCalls)
+      .where(inArray(toolCalls.stepId, existingStepIds));
+    await database.client
+      .delete(stepArtifacts)
+      .where(inArray(stepArtifacts.stepId, existingStepIds));
+  }
+  await database.client.delete(steps).where(eq(steps.incidentId, incidentId));
+  if (executedSteps.length === 0) {
+    return;
+  }
+
+  const insertedSteps = await database.client
+    .insert(steps)
+    .values(
+      executedSteps.map((step) => ({
+        incidentId,
+        stepIndex: step.stepIndex,
+        type: step.type,
+        toolName: step.toolName ?? null,
+        status: (step.status === 'failed' ? 'failed' : 'success') as const,
+        input:
+          (step.input as
+            | Record<string, unknown>
+            | unknown[]
+            | null
+            | undefined) ?? null,
+        output:
+          (step.output as
+            | Record<string, unknown>
+            | unknown[]
+            | null
+            | undefined) ?? null,
+        summary: step.summary,
+      })),
+    )
+    .returning({ id: steps.id, stepIndex: steps.stepIndex });
+
+  const stepIdByIndex = new Map(
+    insertedSteps.map((record) => [record.stepIndex, record.id]),
+  );
+  const toolCallRows: Array<{
+    stepId: string;
+    toolName: string;
+    latencyMs: number;
+    status: 'success' | 'failed';
+  }> = [];
+  const artifactRows: Array<{
+    stepId: string;
+    artifactType: 'logs' | 'report' | 'raw_output';
+    gcsPath: string;
+    metadata: Record<string, unknown>;
+  }> = [];
+  for (const step of executedSteps) {
+    const insertedStepId = stepIdByIndex.get(step.stepIndex);
+    if (!insertedStepId) continue;
+    artifactRows.push({
+      stepId: insertedStepId,
+      artifactType: 'report',
+      gcsPath: `inline://incident/${incidentId}/steps/${step.stepIndex}/input`,
+      metadata: { kind: 'input', payload: step.input ?? null },
+    });
+    artifactRows.push({
+      stepId: insertedStepId,
+      artifactType: step.type === 'tool_call' ? 'raw_output' : 'report',
+      gcsPath: `inline://incident/${incidentId}/steps/${step.stepIndex}/output`,
+      metadata: {
+        kind: 'output',
+        payload: step.output ?? null,
+        summary: step.summary,
+      },
+    });
+    const toolResult = step.planStep
+      ? resultsByStepId.get(step.planStep.id)
+      : undefined;
+    if (toolResult && step.toolName) {
+      toolCallRows.push({
+        stepId: insertedStepId,
+        toolName: step.toolName,
+        latencyMs: toolResult.latencyMs ?? 0,
+        status: toToolStatus(toolResult.status),
+      });
+    }
+  }
+  if (artifactRows.length > 0) {
+    await database.client.insert(stepArtifacts).values(artifactRows);
+  }
+  if (toolCallRows.length > 0) {
+    await database.client.insert(toolCalls).values(toolCallRows);
+  }
+};
+
 const loadIncident = async (incidentId: string): Promise<Incident> => {
   const incident = await database.client.query.incidents.findFirst({
     where: eq(incidents.id, incidentId),
@@ -386,7 +629,7 @@ const loadState = async (
   });
   if (!record) return null;
   const metadata = (record.metadata ?? {}) as Record<string, unknown>;
-  return {
+  const state: InvestigationState = {
     incidentId: record.incidentId,
     status: record.status,
     iterationCount: record.iterationCount,
@@ -404,14 +647,14 @@ const loadState = async (
     lastSignals: Array.isArray(record.lastSignals)
       ? (record.lastSignals as InvestigationState['lastSignals'])
       : [],
-    ...(metadata.stopCondition
-      ? {
-          stopCondition: metadata.stopCondition as InvestigationState['stopCondition'],
-        }
-      : {}),
-    metadata: metadata as InvestigationState['metadata'],
+    metadata: metadata as unknown as InvestigationState['metadata'],
     updatedAt: record.updatedAt.toISOString(),
   };
+  if (metadata.stopCondition) {
+    state.stopCondition =
+      metadata.stopCondition as InvestigationState['stopCondition'];
+  }
+  return state;
 };
 
 const saveState = async (state: InvestigationState): Promise<void> => {
@@ -431,7 +674,7 @@ const saveState = async (state: InvestigationState): Promise<void> => {
       steps: state.steps,
       lastToolResults: state.lastToolResults,
       stopCondition: state.stopCondition ?? null,
-    } as JsonObject,
+    } as unknown as JsonObject,
     updatedAt: new Date(),
   };
   if (existing) {
@@ -512,7 +755,10 @@ createService(
           metadata: {},
           updatedAt: new Date().toISOString(),
         };
-        state.plan = createDefaultPlan(request.incidentId, request.maxSteps ?? 3);
+        state.plan = createDefaultPlan(
+          request.incidentId,
+          request.maxSteps ?? 3,
+        );
         state.iterationCount += 1;
         state.updatedAt = new Date().toISOString();
         await saveState(state);
@@ -546,61 +792,186 @@ createService(
             `Investigation state for ${request.incidentId} not found`,
           );
         }
-        state.steps = request.stepIds.map((stepId, index) => ({
-          id: `${stepId}-execution`,
-          incidentId: request.incidentId,
-          stepIndex: index,
-          type: 'reasoning',
-          status: 'success',
-          summary: `Executed placeholder logic for ${stepId}.`,
-          findings: [],
-          entityIds: [],
-          createdAt: new Date().toISOString(),
-        }));
+        const planStepsById = new Map(
+          state.plan.map((step) => [step.id, step]),
+        );
+        const completedPlanStepIds = new Set(
+          state.steps
+            .map((step) => step.planStep)
+            .filter((planStep): planStep is PlanStep => Boolean(planStep))
+            .filter((planStep) => planStep.status === 'completed')
+            .map((planStep) => planStep.id),
+        );
+        const now = Date.now();
+        const executedSteps: InvestigationState['steps'] = [];
+        const latestResults: ToolExecutionResult[] = [];
+        const warnings: Array<{
+          code: string;
+          message: string;
+          retryable: boolean;
+        }> = [];
+        let failedDependencyCount = 0;
+
+        for (const [index, stepId] of request.stepIds.entries()) {
+          const planStep = planStepsById.get(stepId);
+          if (!planStep) {
+            warnings.push({
+              code: 'UNKNOWN_PLAN_STEP',
+              message: `Step ${stepId} does not exist in the current plan and was skipped.`,
+              retryable: false,
+            });
+            failedDependencyCount += 1;
+            continue;
+          }
+          const unmetDependencies = planStep.dependsOn.filter(
+            (dependencyId) => !completedPlanStepIds.has(dependencyId),
+          );
+          if (unmetDependencies.length > 0) {
+            warnings.push({
+              code: 'STEP_DEPENDENCY_BLOCKED',
+              message: `Step ${stepId} was skipped because dependencies were not completed: ${unmetDependencies.join(', ')}.`,
+              retryable: true,
+            });
+            failedDependencyCount += unmetDependencies.length;
+            continue;
+          }
+
+          const input = buildStepInput(request.incidentId, planStep, state);
+          const isToolStep =
+            planStep.title.toLowerCase().includes('collect') ||
+            planStep.title.toLowerCase().includes('review');
+          const startedAt = new Date(now + index * 10).toISOString();
+          const completedAt = new Date(now + index * 10 + 5).toISOString();
+          const toolRequest = isToolStep
+            ? buildToolRequest(request.incidentId, planStep, state)
+            : undefined;
+          const output =
+            isToolStep && toolRequest
+              ? buildToolOutput(toolRequest, state)
+              : buildReasoningOutput(request.incidentId, planStep, input);
+          const result = toolRequest
+            ? {
+                requestId: toolRequest.id,
+                incidentId: request.incidentId,
+                stepId: planStep.id,
+                status: 'success' as const,
+                startedAt,
+                completedAt,
+                latencyMs: 5,
+                output,
+              }
+            : undefined;
+          const stepSummary = output.rawSummary;
+          const stepFinding: Finding = {
+            summary: stepSummary,
+            confidence: output.confidence,
+            entities: output.entities,
+            evidenceRefs: output.evidenceRefs,
+            structuredSignals: output.structuredSignals,
+            metadata: {
+              planStepId: planStep.id,
+              executionType: isToolStep ? 'tool_call' : 'reasoning',
+            },
+            createdAt: completedAt,
+          };
+          const executedPlanStep: PlanStep = {
+            ...planStep,
+            status: 'completed',
+            toolRequestIds: toolRequest
+              ? [toolRequest.id]
+              : planStep.toolRequestIds,
+          };
+          executedSteps.push({
+            id: `${planStep.id}-execution`,
+            incidentId: request.incidentId,
+            stepIndex: state.steps.length + executedSteps.length,
+            type: isToolStep ? 'tool_call' : 'reasoning',
+            status: 'success',
+            summary: stepSummary,
+            ...(toolRequest?.toolName
+              ? { toolName: toolRequest.toolName }
+              : {}),
+            planStep: executedPlanStep,
+            input: toolRequest?.input ?? input,
+            output,
+            findings: [stepFinding],
+            entityIds: output.entities.map((entity) => entity.id),
+            createdAt: completedAt,
+          });
+          if (result) {
+            latestResults.push(result);
+          }
+          completedPlanStepIds.add(planStep.id);
+          state.findings.push(stepFinding);
+        }
+
+        state.plan = state.plan.map((planStep) => {
+          const executedStep = executedSteps.find(
+            (step) => step.planStep?.id === planStep.id,
+          );
+          if (executedStep?.planStep) {
+            return executedStep.planStep;
+          }
+          if (
+            request.stepIds.includes(planStep.id) &&
+            !completedPlanStepIds.has(planStep.id)
+          ) {
+            return { ...planStep, status: 'skipped' };
+          }
+          return planStep;
+        });
+        state.steps = [...state.steps, ...executedSteps];
+        state.lastToolResults = latestResults;
+        state.lastSignals = extractSignalsFromResults(latestResults);
+        state.metadata = {
+          ...(state.metadata ?? {}),
+          lastExecutedEvidenceIds: extractEvidenceIdsFromResults(latestResults),
+          lastExecutedStepSummaries: executedSteps.map((step) => step.summary),
+        };
         state.updatedAt = new Date().toISOString();
         await saveState(state);
+        await persistExecutionRecords(
+          request.incidentId,
+          state.steps,
+          new Map(latestResults.map((result) => [result.stepId, result])),
+        );
 
-        await database.client
-          .delete(steps)
-          .where(eq(steps.incidentId, request.incidentId));
-        if (state.steps.length > 0) {
-          await database.client.insert(steps).values(
-            state.steps.map((step) => ({
-              incidentId: request.incidentId,
-              stepIndex: step.stepIndex,
-              type: step.type,
-              status: 'success',
-              input: null,
-              output: { summary: step.summary },
-              summary: step.summary,
-              toolName: step.toolName ?? null,
-            })),
-          );
+        const executedStepIds = executedSteps
+          .map((step) => step.planStep?.id)
+          .filter((stepId): stepId is string => Boolean(stepId));
+        if (request.stepIds.length === 0) {
+          warnings.push({
+            code: 'NO_STEPS_EXECUTED',
+            message:
+              'No step ids were supplied; evaluation will run with deterministic fallback behavior only if no persisted evidence exists.',
+            retryable: false,
+          });
         }
         const response: ExecuteInvestigationResponse = {
           phase: 'execute',
           incidentId: request.incidentId,
           state,
-          executedStepIds: request.stepIds,
+          executedStepIds,
           control: buildControl(request.context, {
             status: 'continue',
             nextPhase: '/evaluate',
-            reason: 'Execution completed and results are ready for evaluation.',
-            partialFailure:
-              request.stepIds.length === 0
-                ? {
-                    affectedStepIds: [],
-                    failedDependencyCount: 0,
-                    handling: 'degraded_continue',
-                    warnings: [
-                      {
-                        code: 'NO_STEPS_EXECUTED',
-                        message: 'No step ids were supplied; evaluation will run with deterministic fallback behavior.',
-                        retryable: false,
-                      },
-                    ],
-                  }
-                : undefined,
+            reason:
+              'Execution completed and persisted concrete reasoning/tool outputs for evaluation.',
+            ...(warnings.length > 0
+              ? {
+                  partialFailure: {
+                    affectedStepIds: request.stepIds.filter(
+                      (stepId) => !executedStepIds.includes(stepId),
+                    ),
+                    failedDependencyCount,
+                    handling:
+                      executedStepIds.length > 0
+                        ? 'degraded_continue'
+                        : 'retry_recommended',
+                    warnings,
+                  },
+                }
+              : {}),
           }),
           metadata: buildMetadata(request.context),
         };
@@ -620,12 +991,32 @@ createService(
           );
         }
 
-        const deterministicSummary = `Evaluation completed for ${request.evidenceIds.length} evidence identifiers.`;
+        const persistedEvidenceIds = Array.isArray(
+          state.metadata?.lastExecutedEvidenceIds,
+        )
+          ? state.metadata.lastExecutedEvidenceIds.filter(
+              (item): item is string => typeof item === 'string',
+            )
+          : [];
+        const latestEvidenceIds = Array.from(
+          new Set([
+            ...request.evidenceIds,
+            ...persistedEvidenceIds,
+            ...extractEvidenceIdsFromResults(state.lastToolResults),
+          ]),
+        );
+        const evaluationInputs = Array.from(
+          new Set([
+            ...state.steps.map((step) => step.summary),
+            ...state.lastToolResults.map((result) => result.output.rawSummary),
+          ]),
+        );
+        const deterministicSummary = `Evaluation completed for ${latestEvidenceIds.length} evidence identifiers.`;
         const summaryResult = await adk.summarize({
           incidentId: request.incidentId,
           incidentTitle: request.incidentId,
-          findings: state.steps.map((step) => step.summary),
-          evidenceIds: request.evidenceIds,
+          findings: evaluationInputs,
+          evidenceIds: latestEvidenceIds,
           maxBullets: 3,
         });
         const summary = validateSummaryOutput(
@@ -636,39 +1027,44 @@ createService(
         const hypothesisResult = await adk.generateHypotheses({
           incidentId: request.incidentId,
           incidentSummary: summary.summary,
-          findingSummaries: state.steps.map((step) => step.summary),
+          findingSummaries: evaluationInputs,
           maxHypotheses: 3,
         });
         const hypotheses = validateHypothesesOutput(hypothesisResult.output);
 
         const fallbackSignalResult = await adk.extractFallbackSignals({
           incidentId: request.incidentId,
-          rawSignals: request.evidenceIds,
+          rawSignals:
+            latestEvidenceIds.length > 0 ? latestEvidenceIds : evaluationInputs,
           knownEntityIds: state.entities.map((entity) => entity.id),
           maxSignals: 5,
         });
         const validatedSignalExtraction = validateFallbackSignalsOutput(
           fallbackSignalResult.output,
-          request.evidenceIds,
+          latestEvidenceIds,
         );
-        const deterministicSignals = buildDeterministicSignals(
-          request.evidenceIds,
-        );
+        const deterministicSignals =
+          buildDeterministicSignals(latestEvidenceIds);
         state.lastSignals =
           validatedSignalExtraction.signals.length > 0
             ? validatedSignalExtraction.signals.map((signal) => ({ ...signal }))
             : deterministicSignals;
 
+        const evaluationEvidenceRefs = state.lastToolResults.flatMap((result) =>
+          result.output.evidenceRefs.map((evidenceRef) => ({ ...evidenceRef })),
+        );
         state.findings = [
           {
             summary: summary.summary,
-            confidence: request.evidenceIds.length > 0 ? 0.7 : 0.4,
-            hypothesis: hypotheses.hypotheses[0]?.hypothesis,
+            confidence: latestEvidenceIds.length > 0 ? 0.7 : 0.4,
+            ...(hypotheses.hypotheses[0]?.hypothesis
+              ? { hypothesis: hypotheses.hypotheses[0].hypothesis }
+              : {}),
             entities: [],
-            evidenceRefs: [],
+            evidenceRefs: evaluationEvidenceRefs,
             structuredSignals: state.lastSignals,
             metadata: {
-              evidenceIds: request.evidenceIds,
+              evidenceIds: latestEvidenceIds,
               llm: {
                 summarizationOk: summaryResult.ok,
                 hypothesisGenerationOk: hypothesisResult.ok,
@@ -682,7 +1078,7 @@ createService(
           },
         ];
         state.stagnationCount =
-          request.evidenceIds.length === 0 ? state.stagnationCount + 1 : 0;
+          latestEvidenceIds.length === 0 ? state.stagnationCount + 1 : 0;
         state.stopCondition = {
           shouldStop: false,
           reason:
@@ -706,7 +1102,10 @@ createService(
             summaries: state.findings.map((finding) => finding.summary),
           },
           control: buildControl(request.context, {
-            status: state.iterationCount >= 2 || state.findings.length > 0 ? 'stop' : 'continue',
+            status:
+              state.iterationCount >= 2 || state.findings.length > 0
+                ? 'stop'
+                : 'continue',
             nextPhase:
               state.iterationCount >= 2 || state.findings.length > 0
                 ? '/finalize'
@@ -715,21 +1114,23 @@ createService(
               state.iterationCount >= 2 || state.findings.length > 0
                 ? 'Engine-controlled stop condition satisfied.'
                 : 'Another planning iteration is required.',
-            partialFailure:
-              request.evidenceIds.length === 0
-                ? {
+            ...(latestEvidenceIds.length === 0
+              ? {
+                  partialFailure: {
                     affectedStepIds: [],
                     failedDependencyCount: 0,
                     handling: 'degraded_continue',
                     warnings: [
                       {
                         code: 'NO_EVIDENCE_IDS',
-                        message: 'Evaluation proceeded with fallback signals because no evidence ids were supplied.',
+                        message:
+                          'Evaluation proceeded with fallback signals because execution did not yield persisted evidence ids.',
                         retryable: false,
                       },
                     ],
-                  }
-                : undefined,
+                  },
+                }
+              : {}),
           }),
           metadata: buildMetadata(request.context),
         };
