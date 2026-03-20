@@ -33,6 +33,7 @@ import type {
   ToolExecutionResult,
   ToolOutput,
 } from '@investigation-ai/shared-types';
+import { getDefaultToolAdapter, type InvestigationToolName } from '@investigation-ai/tools';
 import {
   defaultWorkflowRetryPolicy,
   defaultWorkflowTimeoutPolicy,
@@ -164,6 +165,21 @@ const buildMetadata = (
   correlationId: context.correlationId,
   generatedAt: new Date().toISOString(),
 });
+
+
+const resolveRegisteredToolAdapter = (toolName: string) => {
+  const knownTools = new Set<InvestigationToolName>([
+    'gcp-logging',
+    'firestore',
+    'github',
+    'cloud-monitoring',
+    'grafana',
+  ]);
+  if (!knownTools.has(toolName as InvestigationToolName)) {
+    return null;
+  }
+  return getDefaultToolAdapter(toolName as InvestigationToolName);
+};
 
 const createDefaultPlan = (incidentId: string, maxSteps = 3): PlanStep[] =>
   [
@@ -456,9 +472,10 @@ const buildToolOutput = (
   request: ToolExecutionRequest,
   state: InvestigationState,
 ): ToolOutput => {
+  const selectedAdapter = resolveRegisteredToolAdapter(request.toolName);
   const evidenceId = `${request.stepId}-tool-evidence`;
   return {
-    rawSummary: `${request.toolName} executed for ${request.stepId} and captured ${request.targetEntityIds.length || state.entities.length || 1} investigation targets.`,
+    rawSummary: `${request.toolName} executed for ${request.stepId} and captured ${request.targetEntityIds.length || state.entities.length || 1} investigation targets.${selectedAdapter ? ` Selected adapter: ${selectedAdapter.name}.` : ''}`,
     structuredSignals: [
       {
         name: `${request.stepId}-tool-signal`,

@@ -194,6 +194,12 @@ export interface InvestigationToolAdapter<
 export class InvestigationToolRegistry {
   private readonly adapters = new Map<InvestigationToolName, InvestigationToolAdapter>();
 
+  constructor(adapters: InvestigationToolAdapter[] = []) {
+    for (const adapter of adapters) {
+      this.register(adapter);
+    }
+  }
+
   register<TInput extends BaseToolInput, TOutput extends BaseToolOutput>(
     adapter: InvestigationToolAdapter<TInput, TOutput>,
   ): this {
@@ -208,7 +214,27 @@ export class InvestigationToolRegistry {
   list(): InvestigationToolAdapter[] {
     return [...this.adapters.values()];
   }
+
+  resolve(name: InvestigationToolName): InvestigationToolAdapter {
+    const adapter = this.get(name);
+    if (!adapter) {
+      throw new Error(`No adapter registered for investigation tool ${name}`);
+    }
+    return adapter;
+  }
 }
+
+export const defaultToolAdapters: InvestigationToolAdapter[] = [
+  new GcpLoggingAdapter(),
+  new FirestoreAdapter(),
+  new GitHubAdapter(),
+  new CloudMonitoringAdapter(),
+  new GrafanaAdapter(),
+];
+
+export const getDefaultToolAdapter = (
+  name: InvestigationToolName,
+): InvestigationToolAdapter => new InvestigationToolRegistry(defaultToolAdapters).resolve(name);
 
 export interface LoggingToolInput extends BaseToolInput {
   resourceNames?: string[];
@@ -238,9 +264,4 @@ export {
 };
 
 export const createDefaultToolRegistry = (): InvestigationToolRegistry =>
-  new InvestigationToolRegistry()
-    .register(new GcpLoggingAdapter())
-    .register(new FirestoreAdapter())
-    .register(new GitHubAdapter())
-    .register(new CloudMonitoringAdapter())
-    .register(new GrafanaAdapter());
+  new InvestigationToolRegistry(defaultToolAdapters);
