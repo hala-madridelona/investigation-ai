@@ -1,4 +1,10 @@
-import type { BaseToolOutput, MetricsToolInput, ToolExecutionContext, ToolResult } from '../index.js';
+import type {
+  BaseToolOutput,
+  MetricsToolInput,
+  ToolExecutionContext,
+  ToolResult,
+} from '../index.js';
+import { createToolExecutionEnvelope } from '../index.js';
 import { StubToolAdapter } from './base.js';
 
 export class CloudMonitoringAdapter extends StubToolAdapter<MetricsToolInput, BaseToolOutput> {
@@ -8,17 +14,29 @@ export class CloudMonitoringAdapter extends StubToolAdapter<MetricsToolInput, Ba
     input: MetricsToolInput,
     context: ToolExecutionContext,
   ): Promise<ToolResult<BaseToolOutput>> {
-    void input;
-    void context;
+    const summary = 'Cloud Monitoring adapter stub: provider SDK integration not implemented yet.';
+    const rawOutput = {
+      contentType: 'json' as const,
+      content: {
+        query: input.query,
+        metricNames: input.metricNames ?? [],
+        dashboardUid: input.dashboardUid ?? null,
+        correlationIds: context.correlationIds,
+      },
+    };
+    const findings = [{ summary, evidenceRefs: [], confidence: 0.1 }];
 
     return {
       tool: this.name,
       status: 'partial',
+      execution: createToolExecutionEnvelope(rawOutput, findings),
       output: {
+        rawOutput,
+        findings,
         signals: [],
         entities: [],
         evidence: [],
-        summary: 'Cloud Monitoring adapter stub: provider SDK integration not implemented yet.',
+        summary,
       },
     };
   }
@@ -31,17 +49,29 @@ export class GrafanaAdapter extends StubToolAdapter<MetricsToolInput, BaseToolOu
     input: MetricsToolInput,
     context: ToolExecutionContext,
   ): Promise<ToolResult<BaseToolOutput>> {
-    void input;
-    void context;
+    const summary = 'Grafana adapter stub: provider SDK integration not implemented yet.';
+    const rawOutput = {
+      contentType: 'json' as const,
+      content: {
+        query: input.query,
+        metricNames: input.metricNames ?? [],
+        dashboardUid: input.dashboardUid ?? null,
+        correlationIds: context.correlationIds,
+      },
+    };
+    const findings = [{ summary, evidenceRefs: [], confidence: 0.1 }];
 
     return {
       tool: this.name,
       status: 'partial',
+      execution: createToolExecutionEnvelope(rawOutput, findings),
       output: {
+        rawOutput,
+        findings,
         signals: [],
         entities: [],
         evidence: [],
-        summary: 'Grafana adapter stub: provider SDK integration not implemented yet.',
+        summary,
       },
     };
   }

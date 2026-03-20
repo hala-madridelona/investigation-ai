@@ -11,6 +11,7 @@ import {
   asObject,
   asString,
   asStringArray,
+  createRecordMetadata,
   createService,
   loadConfig,
   sendJson,
@@ -122,6 +123,9 @@ const validateWorkflowContext = (input: unknown): WorkflowRequestContext => {
       'context.workflowExecutionId',
     ),
     correlationId: asString(context.correlationId, 'context.correlationId'),
+    correlationIds: Array.isArray(context.correlationIds)
+      ? context.correlationIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      : [asString(context.correlationId, 'context.correlationId')],
     idempotencyKey: asString(context.idempotencyKey, 'context.idempotencyKey'),
     attempt,
     requestedAt: asString(context.requestedAt, 'context.requestedAt'),
@@ -156,6 +160,7 @@ const buildMetadata = (
   requestId: context.requestId,
   workflowExecutionId: context.workflowExecutionId,
   correlationId: context.correlationId,
+  correlationIds: context.correlationIds ?? [context.correlationId],
   generatedAt: new Date().toISOString(),
 });
 
@@ -457,8 +462,10 @@ createService(
       method: 'POST',
       path: '/init',
       validate: validateInit,
-      handler: async ({ body, res }) => {
+      handler: async ({ body, res, logger }) => {
         const request = body as InitInvestigationRequest;
+        const correlationIds = request.context.correlationIds ?? [request.context.correlationId];
+        const requestLogger = logger.child({ correlationIds, incidentId: request.incident.id });
         const incident = await loadIncident(request.incident.id!);
         const state: InvestigationState = {
           incidentId: incident.id!,
@@ -474,6 +481,12 @@ createService(
           metadata: {
             initializedBy: 'investigation-engine',
             adkPolicy: 'engine-validated-only',
+            recordMetadata: createRecordMetadata({
+              actor: { type: 'service', id: 'investigation-engine' },
+              source: { kind: 'workflow', id: 'init', displayName: 'init' },
+              correlationIds,
+              incidentId: incident.id,
+            }),
           },
           updatedAt: new Date().toISOString(),
         };
@@ -489,6 +502,7 @@ createService(
           }),
           metadata: buildMetadata(request.context),
         };
+        requestLogger.info('investigation.init.completed', { incidentId: incident.id, correlationIds });
         sendJson(res, 200, response);
       },
     },
@@ -496,8 +510,10 @@ createService(
       method: 'POST',
       path: '/plan',
       validate: validatePlan,
-      handler: async ({ body, res }) => {
+      handler: async ({ body, res, logger }) => {
         const request = body as PlanInvestigationRequest;
+        const correlationIds = request.context.correlationIds ?? [request.context.correlationId];
+        const requestLogger = logger.child({ correlationIds, incidentId: request.incidentId });
         const state = (await loadState(request.incidentId)) ?? {
           incidentId: request.incidentId,
           status: 'running',
@@ -509,7 +525,14 @@ createService(
           steps: [],
           lastToolResults: [],
           lastSignals: [],
-          metadata: {},
+          metadata: {
+            recordMetadata: createRecordMetadata({
+              actor: { type: 'service', id: 'investigation-engine' },
+              source: { kind: 'workflow', id: 'plan', displayName: 'plan' },
+              correlationIds,
+              incidentId: request.incidentId,
+            }),
+          },
           updatedAt: new Date().toISOString(),
         };
         state.plan = createDefaultPlan(request.incidentId, request.maxSteps ?? 3);
@@ -531,6 +554,7 @@ createService(
           }),
           metadata: buildMetadata(request.context),
         };
+        requestLogger.info('investigation.plan.completed', { incidentId: request.incidentId, correlationIds, stepCount: state.plan.length });
         sendJson(res, 200, response);
       },
     },
@@ -538,8 +562,10 @@ createService(
       method: 'POST',
       path: '/execute',
       validate: validateExecute,
-      handler: async ({ body, res }) => {
+      handler: async ({ body, res, logger }) => {
         const request = body as ExecuteInvestigationRequest;
+        const correlationIds = request.context.correlationIds ?? [request.context.correlationId];
+        const requestLogger = logger.child({ correlationIds, incidentId: request.incidentId });
         const state = await loadState(request.incidentId);
         if (!state) {
           throw new Error(
@@ -555,6 +581,13 @@ createService(
           summary: `Executed placeholder logic for ${stepId}.`,
           findings: [],
           entityIds: [],
+          recordMetadata: createRecordMetadata({
+            actor: { type: 'service', id: 'investigation-engine' },
+            source: { kind: 'workflow', id: 'execute', displayName: stepId },
+            correlationIds,
+            incidentId: request.incidentId,
+            investigationStepId: stepId,
+          }),
           createdAt: new Date().toISOString(),
         }));
         state.updatedAt = new Date().toISOString();
@@ -574,6 +607,10 @@ createService(
               output: { summary: step.summary },
               summary: step.summary,
               toolName: step.toolName ?? null,
+              metadata: {
+                recordMetadata: step.recordMetadata,
+                outputKind: 'summary_only',
+              },
             })),
           );
         }
@@ -604,6 +641,7 @@ createService(
           }),
           metadata: buildMetadata(request.context),
         };
+        requestLogger.info('investigation.execute.completed', { incidentId: request.incidentId, correlationIds, stepIds: request.stepIds });
         sendJson(res, 200, response);
       },
     },
@@ -611,8 +649,10 @@ createService(
       method: 'POST',
       path: '/evaluate',
       validate: validateEvaluate,
-      handler: async ({ body, res }) => {
+      handler: async ({ body, res, logger }) => {
         const request = body as EvaluateInvestigationRequest;
+        const correlationIds = request.context.correlationIds ?? [request.context.correlationId];
+        const requestLogger = logger.child({ correlationIds, incidentId: request.incidentId });
         const state = await loadState(request.incidentId);
         if (!state) {
           throw new Error(
@@ -669,6 +709,7 @@ createService(
             structuredSignals: state.lastSignals,
             metadata: {
               evidenceIds: request.evidenceIds,
+              outputKind: 'summarized_finding',
               llm: {
                 summarizationOk: summaryResult.ok,
                 hypothesisGenerationOk: hypothesisResult.ok,
@@ -678,6 +719,12 @@ createService(
                 discardedSignals: validatedSignalExtraction.discardedSignals,
               },
             },
+            recordMetadata: createRecordMetadata({
+              actor: { type: 'service', id: 'investigation-engine' },
+              source: { kind: 'workflow', id: 'evaluate', displayName: 'evaluate' },
+              correlationIds,
+              incidentId: request.incidentId,
+            }),
             createdAt: new Date().toISOString(),
           },
         ];
@@ -733,6 +780,7 @@ createService(
           }),
           metadata: buildMetadata(request.context),
         };
+        requestLogger.info('investigation.evaluate.completed', { incidentId: request.incidentId, correlationIds, evidenceCount: request.evidenceIds.length });
         sendJson(res, 200, response);
       },
     },
@@ -740,8 +788,10 @@ createService(
       method: 'POST',
       path: '/finalize',
       validate: validateFinalize,
-      handler: async ({ body, res }) => {
+      handler: async ({ body, res, logger }) => {
         const request = body as FinalizeInvestigationRequest;
+        const correlationIds = request.context.correlationIds ?? [request.context.correlationId];
+        const requestLogger = logger.child({ correlationIds, incidentId: request.incidentId });
         const [state, incident] = await Promise.all([
           loadState(request.incidentId),
           loadIncident(request.incidentId),
@@ -796,6 +846,12 @@ createService(
                   'Connect a real Google ADK transport to enrich this draft while keeping orchestration deterministic.',
                 ],
           evidenceRefs: [],
+          recordMetadata: createRecordMetadata({
+            actor: { type: 'service', id: 'investigation-engine' },
+            source: { kind: 'report', id: 'finalize', displayName: 'finalize' },
+            correlationIds,
+            incidentId: request.incidentId,
+          }),
           createdAt: new Date().toISOString(),
         };
         const response: FinalizeInvestigationResponse = {
@@ -812,6 +868,7 @@ createService(
           }),
           metadata: buildMetadata(request.context),
         };
+        requestLogger.info('investigation.finalize.completed', { incidentId: request.incidentId, correlationIds, findingCount: state.findings.length });
         sendJson(res, 200, response);
       },
     },

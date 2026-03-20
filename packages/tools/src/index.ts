@@ -1,4 +1,13 @@
-import type { JsonObject, JsonValue } from '@investigation-ai/shared-types';
+import type {
+  ActorMetadata,
+  FindingSummary,
+  JsonObject,
+  JsonValue,
+  RawToolOutput,
+  RecordMetadata,
+  SourceMetadata,
+  ToolExecutionEnvelope,
+} from '@investigation-ai/shared-types';
 import {
   CloudMonitoringAdapter,
   GrafanaAdapter,
@@ -17,7 +26,7 @@ export const investigationToolNames = [
 
 export type InvestigationToolName = (typeof investigationToolNames)[number];
 
-export const evidenceReferenceKinds = ['log', 'metric_chart', 'query', 'external_url'] as const;
+export const evidenceReferenceKinds = ['log', 'metric_chart', 'query', 'external_url', 'gcs_object'] as const;
 export type EvidenceReferenceKind = (typeof evidenceReferenceKinds)[number];
 
 export const extractedEntityKinds = [
@@ -71,8 +80,11 @@ export interface ToolAuthContext {
 
 export interface ToolExecutionContext {
   incidentId: string;
+  investigationStepId?: string;
   correlationIds: string[];
   auth: ToolAuthContext;
+  actor: ActorMetadata;
+  source: SourceMetadata;
   requestId?: string;
   executionId?: string;
   now?: string;
@@ -90,6 +102,8 @@ export interface BaseToolInput {
 }
 
 export interface BaseToolOutput {
+  rawOutput: RawToolOutput;
+  findings: FindingSummary[];
   signals: ToolSignal[];
   entities: EntityExtractionResult[];
   evidence: EvidenceReference[];
@@ -142,11 +156,18 @@ export interface ExternalUrlEvidenceReference extends EvidenceReferenceBase {
   label?: string;
 }
 
+export interface GcsObjectEvidenceReference extends EvidenceReferenceBase {
+  kind: 'gcs_object';
+  gcsUri: string;
+  contentType?: string;
+}
+
 export type EvidenceReference =
   | LogEvidenceReference
   | MetricChartEvidenceReference
   | QueryEvidenceReference
-  | ExternalUrlEvidenceReference;
+  | ExternalUrlEvidenceReference
+  | GcsObjectEvidenceReference;
 
 export interface EntityExtractionResult {
   id: string;
@@ -180,6 +201,8 @@ export interface ToolResult<TOutput extends BaseToolOutput = BaseToolOutput> {
   tool: InvestigationToolName;
   status: 'success' | 'partial' | 'error';
   output?: TOutput;
+  execution?: ToolExecutionEnvelope;
+  recordMetadata?: RecordMetadata;
   error?: ToolExecutionError;
 }
 
@@ -209,6 +232,27 @@ export class InvestigationToolRegistry {
     return [...this.adapters.values()];
   }
 }
+
+export const createToolRecordMetadata = (context: ToolExecutionContext): RecordMetadata => ({
+  observedAt: context.now ?? new Date().toISOString(),
+  recordedAt: new Date().toISOString(),
+  actor: context.actor,
+  source: context.source,
+  correlationIds: context.correlationIds,
+  incidentId: context.incidentId,
+  ...(context.investigationStepId ? { investigationStepId: context.investigationStepId } : {}),
+});
+
+export const createToolExecutionEnvelope = (
+  rawOutput: RawToolOutput,
+  findings: FindingSummary[],
+  metadata?: JsonObject,
+): ToolExecutionEnvelope => ({
+  rawOutput,
+  findings,
+  persistedAt: new Date().toISOString(),
+  ...(metadata ? { metadata } : {}),
+});
 
 export interface LoggingToolInput extends BaseToolInput {
   resourceNames?: string[];

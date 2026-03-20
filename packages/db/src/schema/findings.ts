@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { doublePrecision, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 import { incidents } from './incidents.js';
@@ -10,5 +11,9 @@ export const findings = pgTable('findings', {
   summary: text('summary').notNull(),
   confidence: doublePrecision('confidence').notNull(),
   evidence: jsonb('evidence').$type<Record<string, unknown> | unknown[]>().notNull(),
+  metadata: jsonb('metadata')
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });

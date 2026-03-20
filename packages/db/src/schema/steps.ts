@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { integer, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 import { incidents } from './incidents.js';
@@ -20,5 +21,9 @@ export const steps = pgTable('steps', {
   input: jsonb('input').$type<Record<string, unknown> | unknown[] | null>(),
   output: jsonb('output').$type<Record<string, unknown> | unknown[] | null>(),
   summary: text('summary').notNull(),
+  metadata: jsonb('metadata')
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
