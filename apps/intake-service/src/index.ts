@@ -5,6 +5,7 @@ import {
   asObject,
   asOptionalString,
   asString,
+  createRecordMetadata,
   createService,
   loadConfig,
   sendJson,
@@ -98,6 +99,7 @@ const buildWorkflowInput = (
   incident: Incident,
   workflowTrigger: WorkflowTrigger,
   requestId: string,
+  correlationIds: string[],
   dedupKey?: string,
 ): WorkflowInput => ({
   trigger: workflowTrigger,
@@ -106,7 +108,8 @@ const buildWorkflowInput = (
     source: 'intake-service',
     receivedAt: new Date().toISOString(),
     requestId,
-    idempotencyKey: `workflow:investigation:${incident.id!}:${dedupKey ?? workflowTrigger.requestedAt}`, 
+    correlationIds,
+    idempotencyKey: `workflow:investigation:${incident.id!}:${dedupKey ?? workflowTrigger.requestedAt}`,
     retryPolicy: defaultWorkflowRetryPolicy,
     timeoutPolicy: defaultWorkflowTimeoutPolicy,
   },
@@ -119,9 +122,20 @@ createService(
       method: 'POST',
       path: '/webhooks/pagerduty',
       validate: validateIntakeWebhook,
-      handler: async ({ body, res, requestId, logger }) => {
+      handler: async ({ body, res, requestId, logger, observability }) => {
         const request = body as IntakeWebhookRequest;
         const normalized = normalizeIncident(request);
+        const incidentMetadata = createRecordMetadata({
+          actor: observability.actor,
+          source: { ...observability.source, id: request.source },
+          correlationIds: observability.correlationIds,
+        });
+        const requestLogger = logger.child({
+          incidentId: normalized.externalId,
+          correlationIds: observability.correlationIds,
+          actor: observability.actor,
+          source: observability.source,
+        });
         const existing = await database.client.query.incidents.findFirst({
           where: eq(incidents.externalId, normalized.externalId),
         });
@@ -136,6 +150,7 @@ createService(
                   status: normalized.status,
                   serviceName: normalized.serviceName,
                   payload: normalized.payload,
+                  metadata: incidentMetadata as unknown as Record<string, unknown>,
                   updatedAt: new Date(),
                 })
                 .where(eq(incidents.id, existing.id))
@@ -151,11 +166,12 @@ createService(
                   status: normalized.status,
                   serviceName: normalized.serviceName,
                   payload: normalized.payload,
+                  metadata: incidentMetadata as unknown as Record<string, unknown>,
                 })
                 .returning()
             )[0];
 
-        logger.info('intake.accepted', {
+        requestLogger.info('intake.accepted', {
           requestId,
           incidentId: persistedIncident.id,
           externalId: persistedIncident.externalId,
@@ -176,12 +192,13 @@ createService(
         const response: IntakeWebhookResponse = {
           accepted: true,
           incident,
-          workflowInput: buildWorkflowInput(incident, workflowTrigger, requestId, request.dedupKey),
+          workflowInput: buildWorkflowInput(incident, workflowTrigger, requestId, observability.correlationIds, request.dedupKey),
           workflowTrigger,
           metadata: {
             receivedAt: new Date().toISOString(),
             source: 'pagerduty',
             requestId,
+            correlationIds: observability.correlationIds,
           },
         };
 

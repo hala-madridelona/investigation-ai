@@ -15,3 +15,5 @@ Use this directory for system diagrams, sequence flows, and architecture decisio
 ## Defined workflow orchestration
 
 - `sequences/gcp-workflows-investigation-engine.md` — exact call sequence, payloads, retry and timeout semantics, idempotency, terminal states, and partial failure handling for GCP Workflows ↔ Investigation Engine orchestration.
+
+- [Observability and persistence conventions](./observability-conventions.md)

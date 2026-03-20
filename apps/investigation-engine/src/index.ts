@@ -13,6 +13,7 @@ import {
   asObject,
   asString,
   asStringArray,
+  createRecordMetadata,
   createService,
   loadConfig,
   sendJson,
@@ -128,6 +129,9 @@ const validateWorkflowContext = (input: unknown): WorkflowRequestContext => {
       'context.workflowExecutionId',
     ),
     correlationId: asString(context.correlationId, 'context.correlationId'),
+    correlationIds: Array.isArray(context.correlationIds)
+      ? context.correlationIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      : [asString(context.correlationId, 'context.correlationId')],
     idempotencyKey: asString(context.idempotencyKey, 'context.idempotencyKey'),
     attempt,
     requestedAt: asString(context.requestedAt, 'context.requestedAt'),
@@ -162,6 +166,7 @@ const buildMetadata = (
   requestId: context.requestId,
   workflowExecutionId: context.workflowExecutionId,
   correlationId: context.correlationId,
+  correlationIds: context.correlationIds ?? [context.correlationId],
   generatedAt: new Date().toISOString(),
 });
 
@@ -700,8 +705,10 @@ createService(
       method: 'POST',
       path: '/init',
       validate: validateInit,
-      handler: async ({ body, res }) => {
+      handler: async ({ body, res, logger }) => {
         const request = body as InitInvestigationRequest;
+        const correlationIds = request.context.correlationIds ?? [request.context.correlationId];
+        const requestLogger = logger.child({ correlationIds, incidentId: request.incident.id });
         const incident = await loadIncident(request.incident.id!);
         const state: InvestigationState = {
           incidentId: incident.id!,
@@ -717,6 +724,12 @@ createService(
           metadata: {
             initializedBy: 'investigation-engine',
             adkPolicy: 'engine-validated-only',
+            recordMetadata: createRecordMetadata({
+              actor: { type: 'service', id: 'investigation-engine' },
+              source: { kind: 'workflow', id: 'init', displayName: 'init' },
+              correlationIds,
+              incidentId: incident.id,
+            }),
           },
           updatedAt: new Date().toISOString(),
         };
@@ -732,6 +745,7 @@ createService(
           }),
           metadata: buildMetadata(request.context),
         };
+        requestLogger.info('investigation.init.completed', { incidentId: incident.id, correlationIds });
         sendJson(res, 200, response);
       },
     },
@@ -739,8 +753,10 @@ createService(
       method: 'POST',
       path: '/plan',
       validate: validatePlan,
-      handler: async ({ body, res }) => {
+      handler: async ({ body, res, logger }) => {
         const request = body as PlanInvestigationRequest;
+        const correlationIds = request.context.correlationIds ?? [request.context.correlationId];
+        const requestLogger = logger.child({ correlationIds, incidentId: request.incidentId });
         const state = (await loadState(request.incidentId)) ?? {
           incidentId: request.incidentId,
           status: 'running',
@@ -752,7 +768,14 @@ createService(
           steps: [],
           lastToolResults: [],
           lastSignals: [],
-          metadata: {},
+          metadata: {
+            recordMetadata: createRecordMetadata({
+              actor: { type: 'service', id: 'investigation-engine' },
+              source: { kind: 'workflow', id: 'plan', displayName: 'plan' },
+              correlationIds,
+              incidentId: request.incidentId,
+            }),
+          },
           updatedAt: new Date().toISOString(),
         };
         state.plan = createDefaultPlan(
@@ -777,6 +800,7 @@ createService(
           }),
           metadata: buildMetadata(request.context),
         };
+        requestLogger.info('investigation.plan.completed', { incidentId: request.incidentId, correlationIds, stepCount: state.plan.length });
         sendJson(res, 200, response);
       },
     },
@@ -784,150 +808,34 @@ createService(
       method: 'POST',
       path: '/execute',
       validate: validateExecute,
-      handler: async ({ body, res }) => {
+      handler: async ({ body, res, logger }) => {
         const request = body as ExecuteInvestigationRequest;
+        const correlationIds = request.context.correlationIds ?? [request.context.correlationId];
+        const requestLogger = logger.child({ correlationIds, incidentId: request.incidentId });
         const state = await loadState(request.incidentId);
         if (!state) {
           throw new Error(
             `Investigation state for ${request.incidentId} not found`,
           );
         }
-        const planStepsById = new Map(
-          state.plan.map((step) => [step.id, step]),
-        );
-        const completedPlanStepIds = new Set(
-          state.steps
-            .map((step) => step.planStep)
-            .filter((planStep): planStep is PlanStep => Boolean(planStep))
-            .filter((planStep) => planStep.status === 'completed')
-            .map((planStep) => planStep.id),
-        );
-        const now = Date.now();
-        const executedSteps: InvestigationState['steps'] = [];
-        const latestResults: ToolExecutionResult[] = [];
-        const warnings: Array<{
-          code: string;
-          message: string;
-          retryable: boolean;
-        }> = [];
-        let failedDependencyCount = 0;
-
-        for (const [index, stepId] of request.stepIds.entries()) {
-          const planStep = planStepsById.get(stepId);
-          if (!planStep) {
-            warnings.push({
-              code: 'UNKNOWN_PLAN_STEP',
-              message: `Step ${stepId} does not exist in the current plan and was skipped.`,
-              retryable: false,
-            });
-            failedDependencyCount += 1;
-            continue;
-          }
-          const unmetDependencies = planStep.dependsOn.filter(
-            (dependencyId) => !completedPlanStepIds.has(dependencyId),
-          );
-          if (unmetDependencies.length > 0) {
-            warnings.push({
-              code: 'STEP_DEPENDENCY_BLOCKED',
-              message: `Step ${stepId} was skipped because dependencies were not completed: ${unmetDependencies.join(', ')}.`,
-              retryable: true,
-            });
-            failedDependencyCount += unmetDependencies.length;
-            continue;
-          }
-
-          const input = buildStepInput(request.incidentId, planStep, state);
-          const isToolStep =
-            planStep.title.toLowerCase().includes('collect') ||
-            planStep.title.toLowerCase().includes('review');
-          const startedAt = new Date(now + index * 10).toISOString();
-          const completedAt = new Date(now + index * 10 + 5).toISOString();
-          const toolRequest = isToolStep
-            ? buildToolRequest(request.incidentId, planStep, state)
-            : undefined;
-          const output =
-            isToolStep && toolRequest
-              ? buildToolOutput(toolRequest, state)
-              : buildReasoningOutput(request.incidentId, planStep, input);
-          const result = toolRequest
-            ? {
-                requestId: toolRequest.id,
-                incidentId: request.incidentId,
-                stepId: planStep.id,
-                status: 'success' as const,
-                startedAt,
-                completedAt,
-                latencyMs: 5,
-                output,
-              }
-            : undefined;
-          const stepSummary = output.rawSummary;
-          const stepFinding: Finding = {
-            summary: stepSummary,
-            confidence: output.confidence,
-            entities: output.entities,
-            evidenceRefs: output.evidenceRefs,
-            structuredSignals: output.structuredSignals,
-            metadata: {
-              planStepId: planStep.id,
-              executionType: isToolStep ? 'tool_call' : 'reasoning',
-            },
-            createdAt: completedAt,
-          };
-          const executedPlanStep: PlanStep = {
-            ...planStep,
-            status: 'completed',
-            toolRequestIds: toolRequest
-              ? [toolRequest.id]
-              : planStep.toolRequestIds,
-          };
-          executedSteps.push({
-            id: `${planStep.id}-execution`,
+        state.steps = request.stepIds.map((stepId, index) => ({
+          id: `${stepId}-execution`,
+          incidentId: request.incidentId,
+          stepIndex: index,
+          type: 'reasoning',
+          status: 'success',
+          summary: `Executed placeholder logic for ${stepId}.`,
+          findings: [],
+          entityIds: [],
+          recordMetadata: createRecordMetadata({
+            actor: { type: 'service', id: 'investigation-engine' },
+            source: { kind: 'workflow', id: 'execute', displayName: stepId },
+            correlationIds,
             incidentId: request.incidentId,
-            stepIndex: state.steps.length + executedSteps.length,
-            type: isToolStep ? 'tool_call' : 'reasoning',
-            status: 'success',
-            summary: stepSummary,
-            ...(toolRequest?.toolName
-              ? { toolName: toolRequest.toolName }
-              : {}),
-            planStep: executedPlanStep,
-            input: toolRequest?.input ?? input,
-            output,
-            findings: [stepFinding],
-            entityIds: output.entities.map((entity) => entity.id),
-            createdAt: completedAt,
-          });
-          if (result) {
-            latestResults.push(result);
-          }
-          completedPlanStepIds.add(planStep.id);
-          state.findings.push(stepFinding);
-        }
-
-        state.plan = state.plan.map((planStep) => {
-          const executedStep = executedSteps.find(
-            (step) => step.planStep?.id === planStep.id,
-          );
-          if (executedStep?.planStep) {
-            return executedStep.planStep;
-          }
-          if (
-            request.stepIds.includes(planStep.id) &&
-            !completedPlanStepIds.has(planStep.id)
-          ) {
-            return { ...planStep, status: 'skipped' };
-          }
-          return planStep;
-        });
-        state.steps = [...state.steps, ...executedSteps];
-        state.lastToolResults = latestResults;
-        state.lastSignals = extractSignalsFromResults(latestResults);
-        state.metadata = {
-          ...(state.metadata ?? {}),
-          lastExecutedEvidenceIds: extractEvidenceIdsFromResults(latestResults),
-          lastExecutedStepSummaries: executedSteps.map((step) => step.summary),
-        };
+            investigationStepId: stepId,
+          }),
+          createdAt: new Date().toISOString(),
+        }));
         state.updatedAt = new Date().toISOString();
         await saveState(state);
         await persistExecutionRecords(
@@ -936,16 +844,26 @@ createService(
           new Map(latestResults.map((result) => [result.stepId, result])),
         );
 
-        const executedStepIds = executedSteps
-          .map((step) => step.planStep?.id)
-          .filter((stepId): stepId is string => Boolean(stepId));
-        if (request.stepIds.length === 0) {
-          warnings.push({
-            code: 'NO_STEPS_EXECUTED',
-            message:
-              'No step ids were supplied; evaluation will run with deterministic fallback behavior only if no persisted evidence exists.',
-            retryable: false,
-          });
+        await database.client
+          .delete(steps)
+          .where(eq(steps.incidentId, request.incidentId));
+        if (state.steps.length > 0) {
+          await database.client.insert(steps).values(
+            state.steps.map((step) => ({
+              incidentId: request.incidentId,
+              stepIndex: step.stepIndex,
+              type: step.type,
+              status: 'success',
+              input: null,
+              output: { summary: step.summary },
+              summary: step.summary,
+              toolName: step.toolName ?? null,
+              metadata: {
+                recordMetadata: step.recordMetadata,
+                outputKind: 'summary_only',
+              },
+            })),
+          );
         }
         const response: ExecuteInvestigationResponse = {
           phase: 'execute',
@@ -975,6 +893,7 @@ createService(
           }),
           metadata: buildMetadata(request.context),
         };
+        requestLogger.info('investigation.execute.completed', { incidentId: request.incidentId, correlationIds, stepIds: request.stepIds });
         sendJson(res, 200, response);
       },
     },
@@ -982,8 +901,10 @@ createService(
       method: 'POST',
       path: '/evaluate',
       validate: validateEvaluate,
-      handler: async ({ body, res }) => {
+      handler: async ({ body, res, logger }) => {
         const request = body as EvaluateInvestigationRequest;
+        const correlationIds = request.context.correlationIds ?? [request.context.correlationId];
+        const requestLogger = logger.child({ correlationIds, incidentId: request.incidentId });
         const state = await loadState(request.incidentId);
         if (!state) {
           throw new Error(
@@ -1064,7 +985,8 @@ createService(
             evidenceRefs: evaluationEvidenceRefs,
             structuredSignals: state.lastSignals,
             metadata: {
-              evidenceIds: latestEvidenceIds,
+              evidenceIds: request.evidenceIds,
+              outputKind: 'summarized_finding',
               llm: {
                 summarizationOk: summaryResult.ok,
                 hypothesisGenerationOk: hypothesisResult.ok,
@@ -1074,6 +996,12 @@ createService(
                 discardedSignals: validatedSignalExtraction.discardedSignals,
               },
             },
+            recordMetadata: createRecordMetadata({
+              actor: { type: 'service', id: 'investigation-engine' },
+              source: { kind: 'workflow', id: 'evaluate', displayName: 'evaluate' },
+              correlationIds,
+              incidentId: request.incidentId,
+            }),
             createdAt: new Date().toISOString(),
           },
         ];
@@ -1134,6 +1062,7 @@ createService(
           }),
           metadata: buildMetadata(request.context),
         };
+        requestLogger.info('investigation.evaluate.completed', { incidentId: request.incidentId, correlationIds, evidenceCount: request.evidenceIds.length });
         sendJson(res, 200, response);
       },
     },
@@ -1141,8 +1070,10 @@ createService(
       method: 'POST',
       path: '/finalize',
       validate: validateFinalize,
-      handler: async ({ body, res }) => {
+      handler: async ({ body, res, logger }) => {
         const request = body as FinalizeInvestigationRequest;
+        const correlationIds = request.context.correlationIds ?? [request.context.correlationId];
+        const requestLogger = logger.child({ correlationIds, incidentId: request.incidentId });
         const [state, incident] = await Promise.all([
           loadState(request.incidentId),
           loadIncident(request.incidentId),
@@ -1197,6 +1128,12 @@ createService(
                   'Connect a real Google ADK transport to enrich this draft while keeping orchestration deterministic.',
                 ],
           evidenceRefs: [],
+          recordMetadata: createRecordMetadata({
+            actor: { type: 'service', id: 'investigation-engine' },
+            source: { kind: 'report', id: 'finalize', displayName: 'finalize' },
+            correlationIds,
+            incidentId: request.incidentId,
+          }),
           createdAt: new Date().toISOString(),
         };
         const response: FinalizeInvestigationResponse = {
@@ -1213,6 +1150,7 @@ createService(
           }),
           metadata: buildMetadata(request.context),
         };
+        requestLogger.info('investigation.finalize.completed', { incidentId: request.incidentId, correlationIds, findingCount: state.findings.length });
         sendJson(res, 200, response);
       },
     },

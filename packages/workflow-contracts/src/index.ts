@@ -91,6 +91,7 @@ export interface WorkflowRequestContext {
   requestId: string;
   workflowExecutionId: string;
   correlationId: string;
+  correlationIds?: string[];
   idempotencyKey: string;
   attempt: number;
   requestedAt: string;
@@ -101,6 +102,7 @@ export interface WorkflowResponseMetadata {
   requestId: string;
   workflowExecutionId: string;
   correlationId: string;
+  correlationIds?: string[];
   generatedAt: string;
   durationMs?: number;
 }
@@ -128,6 +130,7 @@ export interface WorkflowInput {
     source: 'intake-service';
     receivedAt: string;
     requestId: string;
+    correlationIds?: string[];
     idempotencyKey: string;
     retryPolicy: WorkflowRetryPolicy;
     timeoutPolicy: WorkflowTimeoutPolicy;
@@ -143,6 +146,7 @@ export interface IntakeWebhookResponse {
     receivedAt: string;
     source: 'pagerduty';
     requestId: string;
+    correlationIds: string[];
   };
 }
 

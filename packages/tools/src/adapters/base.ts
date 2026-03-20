@@ -6,6 +6,7 @@ import type {
   ToolExecutionContext,
   ToolResult,
 } from '../index.js';
+import { createToolRecordMetadata } from '../index.js';
 
 export abstract class StubToolAdapter<
   TInput extends BaseToolInput,
@@ -15,7 +16,11 @@ export abstract class StubToolAdapter<
   abstract readonly name: InvestigationToolName;
 
   async execute(input: TInput, context: ToolExecutionContext): Promise<ToolResult<TOutput>> {
-    return this.executeWithProvider(input, context);
+    const result = await this.executeWithProvider(input, context);
+    return {
+      ...result,
+      recordMetadata: result.recordMetadata ?? createToolRecordMetadata(context),
+    };
   }
 
   protected abstract executeWithProvider(

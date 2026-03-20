@@ -36,6 +36,8 @@ export const evidenceKinds = [
   'deployment_event',
   'artifact',
   'report',
+  'gcs_object',
+  'external_link',
 ] as const;
 export type EvidenceKind = (typeof evidenceKinds)[number];
 
@@ -83,6 +85,66 @@ export type JsonValue =
   | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
+
+export interface ActorMetadata {
+  type: 'service' | 'user' | 'system' | 'tool';
+  id: string;
+  displayName?: string;
+}
+
+export interface SourceMetadata {
+  kind: 'http' | 'workflow' | 'tool' | 'database' | 'storage' | 'report';
+  id: string;
+  displayName?: string;
+  origin?: string;
+}
+
+export interface RecordMetadata {
+  observedAt: string;
+  recordedAt: string;
+  actor: ActorMetadata;
+  source: SourceMetadata;
+  correlationIds: string[];
+  incidentId?: string;
+  investigationStepId?: string;
+}
+
+export const persistenceDestinations = [
+  'postgres',
+  'gcs',
+  'report_artifact',
+  'debug_only',
+] as const;
+export type PersistenceDestination = (typeof persistenceDestinations)[number];
+
+export interface PersistenceRule {
+  destination: PersistenceDestination;
+  description: string;
+  includes: string[];
+  excludes: string[];
+  retention: string;
+}
+
+export interface RawToolOutput {
+  content: JsonValue;
+  contentType: 'json' | 'text' | 'binary_ref';
+  storageRef?: string;
+  truncated?: boolean;
+}
+
+export interface FindingSummary {
+  summary: string;
+  evidenceRefs: string[];
+  confidence: number;
+}
+
+export interface ToolExecutionEnvelope {
+  rawOutput: RawToolOutput;
+  findings: FindingSummary[];
+  persistedAt?: string;
+  metadata?: JsonObject;
+}
+
 export interface EvidenceRef {
   id: string;
   kind: EvidenceKind;
@@ -90,6 +152,7 @@ export interface EvidenceRef {
   locator: string;
   capturedAt?: string;
   metadata?: JsonObject;
+  recordMetadata?: RecordMetadata;
 }
 
 export interface EntityBase {
@@ -149,11 +212,14 @@ export interface ToolOutputSource {
 
 export interface ToolOutput {
   rawSummary: string;
+  rawOutput?: RawToolOutput;
+  findings?: FindingSummary[];
   structuredSignals: StructuredSignal[];
   entities: Entity[];
   evidenceRefs: EvidenceRef[];
   confidence: number;
   source: ToolOutputSource;
+  recordMetadata?: RecordMetadata;
 }
 
 export interface Incident {
@@ -182,6 +248,7 @@ export interface Finding {
   evidenceRefs: EvidenceRef[];
   structuredSignals: StructuredSignal[];
   metadata?: JsonObject;
+  recordMetadata?: RecordMetadata;
   createdAt?: string;
 }
 
@@ -206,7 +273,9 @@ export interface ToolExecutionRequest {
   input: JsonObject;
   targetEntityIds: string[];
   evidenceRefs: string[];
+  correlationIds?: string[];
   requestedAt?: string;
+  recordMetadata?: RecordMetadata;
 }
 
 export interface ToolExecutionResult {
@@ -219,6 +288,7 @@ export interface ToolExecutionResult {
   latencyMs?: number;
   error?: string;
   output: ToolOutput;
+  recordMetadata?: RecordMetadata;
 }
 
 export interface InvestigationStep {
@@ -234,6 +304,7 @@ export interface InvestigationStep {
   output?: ToolOutput | JsonObject | JsonValue[] | null;
   findings: Finding[];
   entityIds: string[];
+  recordMetadata?: RecordMetadata;
   createdAt?: string;
 }
 
@@ -272,6 +343,7 @@ export interface FinalReport {
   timeline: InvestigationStep[];
   recommendations: string[];
   evidenceRefs: EvidenceRef[];
+  recordMetadata?: RecordMetadata;
   createdAt?: string;
 }
 
