@@ -1,0 +1,19 @@
+{
+  "name": "@investigation-ai/shared-types",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared incident, entity, signal, and report schemas.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsc --watch --pretty",
+    "build": "rimraf dist && tsc -p tsconfig.json",
+    "lint": "eslint \"src/**/*.ts\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {}
+}

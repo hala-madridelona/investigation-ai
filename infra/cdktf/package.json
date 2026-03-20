@@ -1,0 +1,21 @@
+{
+  "name": "@investigation-ai/cdktf",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CDK for Terraform application for GCP infrastructure.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsc --watch --pretty",
+    "build": "rimraf dist && tsc -p tsconfig.json",
+    "lint": "eslint \"src/**/*.ts\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@investigation-ai/workflow-contracts": "workspace:*"
+  }
+}
