@@ -17,6 +17,9 @@ export const investigationToolNames = [
 
 export type InvestigationToolName = (typeof investigationToolNames)[number];
 
+export const isInvestigationToolName = (value: string): value is InvestigationToolName =>
+  investigationToolNames.includes(value as InvestigationToolName);
+
 export const evidenceReferenceKinds = ['log', 'metric_chart', 'query', 'external_url'] as const;
 export type EvidenceReferenceKind = (typeof evidenceReferenceKinds)[number];
 
@@ -194,6 +197,12 @@ export interface InvestigationToolAdapter<
 export class InvestigationToolRegistry {
   private readonly adapters = new Map<InvestigationToolName, InvestigationToolAdapter>();
 
+  constructor(adapters: InvestigationToolAdapter[] = []) {
+    for (const adapter of adapters) {
+      this.register(adapter);
+    }
+  }
+
   register<TInput extends BaseToolInput, TOutput extends BaseToolOutput>(
     adapter: InvestigationToolAdapter<TInput, TOutput>,
   ): this {
@@ -208,7 +217,30 @@ export class InvestigationToolRegistry {
   list(): InvestigationToolAdapter[] {
     return [...this.adapters.values()];
   }
+
+  resolve(name: InvestigationToolName): InvestigationToolAdapter {
+    const adapter = this.get(name);
+    if (!adapter) {
+      throw new Error(`No adapter registered for investigation tool ${name}`);
+    }
+    return adapter;
+  }
 }
+
+export const defaultToolAdapters: InvestigationToolAdapter[] = [
+  new GcpLoggingAdapter(),
+  new FirestoreAdapter(),
+  new GitHubAdapter(),
+  new CloudMonitoringAdapter(),
+  new GrafanaAdapter(),
+];
+
+export const getDefaultToolRegistry = (): InvestigationToolRegistry =>
+  new InvestigationToolRegistry(defaultToolAdapters);
+
+export const getDefaultToolAdapter = (
+  name: InvestigationToolName,
+): InvestigationToolAdapter => getDefaultToolRegistry().resolve(name);
 
 export interface LoggingToolInput extends BaseToolInput {
   resourceNames?: string[];
@@ -237,10 +269,4 @@ export {
   GitHubAdapter,
 };
 
-export const createDefaultToolRegistry = (): InvestigationToolRegistry =>
-  new InvestigationToolRegistry()
-    .register(new GcpLoggingAdapter())
-    .register(new FirestoreAdapter())
-    .register(new GitHubAdapter())
-    .register(new CloudMonitoringAdapter())
-    .register(new GrafanaAdapter());
+export const createDefaultToolRegistry = (): InvestigationToolRegistry => getDefaultToolRegistry();
