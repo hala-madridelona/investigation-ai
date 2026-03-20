@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@investigation-ai/db": "workspace:*",
+    "@investigation-ai/service-runtime": "workspace:*",
     "@investigation-ai/shared-types": "workspace:*",
     "@investigation-ai/tools": "workspace:*",
     "@investigation-ai/workflow-contracts": "workspace:*"
