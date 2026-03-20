@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@investigation-ai/db": "workspace:*",
+    "@google/adk": "^0.5.0",
     "@investigation-ai/service-runtime": "workspace:*",
     "@investigation-ai/shared-types": "workspace:*",
     "@investigation-ai/tools": "workspace:*",
