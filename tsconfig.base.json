@@ -36,6 +36,9 @@
       ],
       "@investigation-ai/workflow-contracts": [
         "packages/workflow-contracts/src/index.ts"
+      ],
+      "@investigation-ai/service-runtime": [
+        "packages/service-runtime/src/index.ts"
       ]
     }
   },
