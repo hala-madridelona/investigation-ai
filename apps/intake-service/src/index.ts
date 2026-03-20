@@ -18,7 +18,12 @@ import {
 import type {
   IntakeWebhookRequest,
   IntakeWebhookResponse,
+  WorkflowInput,
   WorkflowTrigger,
+} from '@investigation-ai/workflow-contracts';
+import {
+  defaultWorkflowRetryPolicy,
+  defaultWorkflowTimeoutPolicy,
 } from '@investigation-ai/workflow-contracts';
 
 const config = loadConfig(process.env, 3001);
@@ -64,12 +69,14 @@ const validateIntakeWebhook = (input: unknown): IntakeWebhookRequest => {
 };
 
 const normalizeIncident = (payload: IntakeWebhookRequest): Incident => ({
-  externalId: payload.incident.externalId ?? payload.incident.id,
+  externalId: payload.incident.externalId ?? payload.incident.id!,
   title: payload.incident.title.trim(),
   status: payload.incident.status ?? 'pending',
   severity: payload.incident.severity,
   serviceName: payload.incident.serviceName.trim(),
-  summary: payload.incident.summary?.trim(),
+  ...(payload.incident.summary
+    ? { summary: payload.incident.summary.trim() }
+    : {}),
   payload: {
     ...(payload.incident.payload ?? {}),
     pagerDuty: payload.payload ?? {},
@@ -84,7 +91,25 @@ const buildWorkflowTrigger = (incidentId: string, dedupKey?: string): WorkflowTr
   action: 'start',
   incidentId,
   requestedAt: new Date().toISOString(),
-  dedupKey,
+  ...(dedupKey ? { dedupKey } : {}),
+});
+
+const buildWorkflowInput = (
+  incident: Incident,
+  workflowTrigger: WorkflowTrigger,
+  requestId: string,
+  dedupKey?: string,
+): WorkflowInput => ({
+  trigger: workflowTrigger,
+  incident,
+  context: {
+    source: 'intake-service',
+    receivedAt: new Date().toISOString(),
+    requestId,
+    idempotencyKey: `workflow:investigation:${incident.id!}:${dedupKey ?? workflowTrigger.requestedAt}`, 
+    retryPolicy: defaultWorkflowRetryPolicy,
+    timeoutPolicy: defaultWorkflowTimeoutPolicy,
+  },
 });
 
 createService(
@@ -95,7 +120,8 @@ createService(
       path: '/webhooks/pagerduty',
       validate: validateIntakeWebhook,
       handler: async ({ body, res, requestId, logger }) => {
-        const normalized = normalizeIncident(body);
+        const request = body as IntakeWebhookRequest;
+        const normalized = normalizeIncident(request);
         const existing = await database.client.query.incidents.findFirst({
           where: eq(incidents.externalId, normalized.externalId),
         });
@@ -133,18 +159,25 @@ createService(
           requestId,
           incidentId: persistedIncident.id,
           externalId: persistedIncident.externalId,
-          source: body.source,
+          source: request.source,
         });
+
+        const incident: Incident = {
+          ...normalized,
+          id: persistedIncident.id,
+          createdAt: persistedIncident.createdAt.toISOString(),
+          updatedAt: persistedIncident.updatedAt.toISOString(),
+        };
+        const workflowTrigger = buildWorkflowTrigger(
+          persistedIncident.id,
+          request.dedupKey,
+        );
 
         const response: IntakeWebhookResponse = {
           accepted: true,
-          incident: {
-            ...normalized,
-            id: persistedIncident.id,
-            createdAt: persistedIncident.createdAt.toISOString(),
-            updatedAt: persistedIncident.updatedAt.toISOString(),
-          },
-          workflowTrigger: buildWorkflowTrigger(persistedIncident.id, body.dedupKey),
+          incident,
+          workflowInput: buildWorkflowInput(incident, workflowTrigger, requestId, request.dedupKey),
+          workflowTrigger,
           metadata: {
             receivedAt: new Date().toISOString(),
             source: 'pagerduty',
