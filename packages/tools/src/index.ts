@@ -1,4 +1,13 @@
-import type { JsonObject, JsonValue } from '@investigation-ai/shared-types';
+import type {
+  ActorMetadata,
+  FindingSummary,
+  JsonObject,
+  JsonValue,
+  RawToolOutput,
+  RecordMetadata,
+  SourceMetadata,
+  ToolExecutionEnvelope,
+} from '@investigation-ai/shared-types';
 import {
   CloudMonitoringAdapter,
   GrafanaAdapter,
@@ -74,8 +83,11 @@ export interface ToolAuthContext {
 
 export interface ToolExecutionContext {
   incidentId: string;
+  investigationStepId?: string;
   correlationIds: string[];
   auth: ToolAuthContext;
+  actor: ActorMetadata;
+  source: SourceMetadata;
   requestId?: string;
   executionId?: string;
   now?: string;
@@ -93,6 +105,8 @@ export interface BaseToolInput {
 }
 
 export interface BaseToolOutput {
+  rawOutput: RawToolOutput;
+  findings: FindingSummary[];
   signals: ToolSignal[];
   entities: EntityExtractionResult[];
   evidence: EvidenceReference[];
@@ -145,11 +159,18 @@ export interface ExternalUrlEvidenceReference extends EvidenceReferenceBase {
   label?: string;
 }
 
+export interface GcsObjectEvidenceReference extends EvidenceReferenceBase {
+  kind: 'gcs_object';
+  gcsUri: string;
+  contentType?: string;
+}
+
 export type EvidenceReference =
   | LogEvidenceReference
   | MetricChartEvidenceReference
   | QueryEvidenceReference
-  | ExternalUrlEvidenceReference;
+  | ExternalUrlEvidenceReference
+  | GcsObjectEvidenceReference;
 
 export interface EntityExtractionResult {
   id: string;
@@ -183,6 +204,8 @@ export interface ToolResult<TOutput extends BaseToolOutput = BaseToolOutput> {
   tool: InvestigationToolName;
   status: 'success' | 'partial' | 'error';
   output?: TOutput;
+  execution?: ToolExecutionEnvelope;
+  recordMetadata?: RecordMetadata;
   error?: ToolExecutionError;
 }
 
