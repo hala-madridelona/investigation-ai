@@ -1,0 +1,46 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": [
+      "ES2022"
+    ],
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "incremental": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "@investigation-ai/shared-types": [
+        "packages/shared-types/src/index.ts"
+      ],
+      "@investigation-ai/db": [
+        "packages/db/src/index.ts"
+      ],
+      "@investigation-ai/tools": [
+        "packages/tools/src/index.ts"
+      ],
+      "@investigation-ai/workflow-contracts": [
+        "packages/workflow-contracts/src/index.ts"
+      ]
+    }
+  },
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
+}
