@@ -34,6 +34,7 @@ import type {
   ToolExecutionResult,
   ToolOutput,
 } from '@investigation-ai/shared-types';
+import { getDefaultToolAdapter, isInvestigationToolName } from '@investigation-ai/tools';
 import {
   defaultWorkflowRetryPolicy,
   defaultWorkflowTimeoutPolicy,
@@ -169,6 +170,10 @@ const buildMetadata = (
   correlationIds: context.correlationIds ?? [context.correlationId],
   generatedAt: new Date().toISOString(),
 });
+
+
+const resolveRegisteredToolAdapter = (toolName: string) =>
+  isInvestigationToolName(toolName) ? getDefaultToolAdapter(toolName) : null;
 
 const createDefaultPlan = (incidentId: string, maxSteps = 3): PlanStep[] =>
   [
@@ -461,9 +466,10 @@ const buildToolOutput = (
   request: ToolExecutionRequest,
   state: InvestigationState,
 ): ToolOutput => {
+  const selectedAdapter = resolveRegisteredToolAdapter(request.toolName);
   const evidenceId = `${request.stepId}-tool-evidence`;
   return {
-    rawSummary: `${request.toolName} executed for ${request.stepId} and captured ${request.targetEntityIds.length || state.entities.length || 1} investigation targets.`,
+    rawSummary: `${selectedAdapter?.name ?? request.toolName} executed for ${request.stepId} and captured ${request.targetEntityIds.length || state.entities.length || 1} investigation targets.`,
     structuredSignals: [
       {
         name: `${request.stepId}-tool-signal`,
