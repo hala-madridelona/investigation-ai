@@ -1,0 +1,141 @@
+# Placeholder GCP Workflows definition for Investigation AI orchestration.
+# Replace ${...} values during deployment.
+main:
+  params: [input]
+  steps:
+    - initialize_context:
+        assign:
+          - engine_base_url: ${INVESTIGATION_ENGINE_BASE_URL}
+          - workflow_input: ${input}
+          - incident_id: ${input.incident.id}
+          - workflow_execution_id: ${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+          - request_timeout_seconds: ${input.context.timeoutPolicy.requestTimeoutSeconds}
+
+    # Call Investigation Engine /init with the workflow input from Intake Service.
+    - init_call:
+        call: http.post
+        args:
+          url: ${engine_base_url + "/init"}
+          timeout: ${request_timeout_seconds}
+          body:
+            context:
+              requestId: ${workflow_input.context.requestId}
+              workflowExecutionId: ${workflow_execution_id}
+              correlationId: ${workflow_input.context.requestId}
+              idempotencyKey: ${workflow_input.context.idempotencyKey + ":init:1"}
+              attempt: 1
+              requestedAt: ${workflow_input.trigger.requestedAt}
+              deadlineAt: ${time.format(sys.now() + duration("900s"))}
+            incident: ${workflow_input.incident}
+        result: init_response
+
+    - plan_loop:
+        steps:
+          # Call /plan and branch only on control.status, never on model text.
+          - plan_call:
+              call: http.post
+              args:
+                url: ${engine_base_url + "/plan"}
+                timeout: ${request_timeout_seconds}
+                body:
+                  context:
+                    requestId: ${workflow_input.context.requestId}
+                    workflowExecutionId: ${workflow_execution_id}
+                    correlationId: ${workflow_input.context.requestId}
+                    idempotencyKey: ${workflow_input.context.idempotencyKey + ":plan:" + string(init_response.body.state.iterationCount + 1)}
+                    attempt: 1
+                    requestedAt: ${workflow_input.trigger.requestedAt}
+                    deadlineAt: ${time.format(sys.now() + duration("900s"))}
+                  incidentId: ${incident_id}
+                  maxSteps: 3
+              result: plan_response
+
+          - after_plan:
+              switch:
+                - condition: ${plan_response.body.control.status == "needs_human_review"}
+                  next: human_review_exit
+                - condition: ${plan_response.body.control.status == "stop"}
+                  next: finalize_call
+
+          # Call /execute using the deterministic step ids returned by /plan.
+          - execute_call:
+              call: http.post
+              args:
+                url: ${engine_base_url + "/execute"}
+                timeout: ${request_timeout_seconds}
+                body:
+                  context:
+                    requestId: ${workflow_input.context.requestId}
+                    workflowExecutionId: ${workflow_execution_id}
+                    correlationId: ${workflow_input.context.requestId}
+                    idempotencyKey: ${workflow_input.context.idempotencyKey + ":execute:" + string(plan_response.body.state.iterationCount)}
+                    attempt: 1
+                    requestedAt: ${workflow_input.trigger.requestedAt}
+                    deadlineAt: ${time.format(sys.now() + duration("900s"))}
+                  incidentId: ${incident_id}
+                  stepIds: ${list.concat([], [for step in plan_response.body.steps: step.id])}
+              result: execute_response
+
+          - after_execute:
+              switch:
+                - condition: ${execute_response.body.control.status == "retry"}
+                  next: execute_call
+                - condition: ${execute_response.body.control.status == "needs_human_review"}
+                  next: human_review_exit
+
+          # Call /evaluate. Loop to /plan only when the engine returns control.status == continue.
+          - evaluate_call:
+              call: http.post
+              args:
+                url: ${engine_base_url + "/evaluate"}
+                timeout: ${request_timeout_seconds}
+                body:
+                  context:
+                    requestId: ${workflow_input.context.requestId}
+                    workflowExecutionId: ${workflow_execution_id}
+                    correlationId: ${workflow_input.context.requestId}
+                    idempotencyKey: ${workflow_input.context.idempotencyKey + ":evaluate:" + string(plan_response.body.state.iterationCount)}
+                    attempt: 1
+                    requestedAt: ${workflow_input.trigger.requestedAt}
+                    deadlineAt: ${time.format(sys.now() + duration("900s"))}
+                  incidentId: ${incident_id}
+                  evidenceIds: ${execute_response.body.executedStepIds}
+              result: evaluate_response
+
+          - after_evaluate:
+              switch:
+                - condition: ${evaluate_response.body.control.status == "continue"}
+                  next: plan_loop
+                - condition: ${evaluate_response.body.control.status == "retry"}
+                  next: evaluate_call
+                - condition: ${evaluate_response.body.control.status == "needs_human_review"}
+                  next: human_review_exit
+                - condition: ${evaluate_response.body.control.status == "stop"}
+                  next: finalize_call
+
+    # Call /finalize only after the engine has already decided to stop.
+    - finalize_call:
+        call: http.post
+        args:
+          url: ${engine_base_url + "/finalize"}
+          timeout: ${request_timeout_seconds}
+          body:
+            context:
+              requestId: ${workflow_input.context.requestId}
+              workflowExecutionId: ${workflow_execution_id}
+              correlationId: ${workflow_input.context.requestId}
+              idempotencyKey: ${workflow_input.context.idempotencyKey + ":finalize:1"}
+              attempt: 1
+              requestedAt: ${workflow_input.trigger.requestedAt}
+              deadlineAt: ${time.format(sys.now() + duration("900s"))}
+            incidentId: ${incident_id}
+        result: finalize_response
+
+    - return_success:
+        return: ${finalize_response.body}
+
+    - human_review_exit:
+        return:
+          incidentId: ${incident_id}
+          terminalState: needs_human_review
+          reason: Manual intervention required by engine control response.

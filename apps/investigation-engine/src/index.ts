@@ -23,21 +23,27 @@ import type {
   HypothesisGenerationResponse,
   Incident,
   InvestigationState,
+  JsonObject,
   PlanStep,
   StructuredSignal,
   SummarizationResponse,
 } from '@investigation-ai/shared-types';
-import type {
-  EvaluateInvestigationRequest,
-  EvaluateInvestigationResponse,
-  ExecuteInvestigationRequest,
-  ExecuteInvestigationResponse,
-  FinalizeInvestigationRequest,
-  FinalizeInvestigationResponse,
-  InitInvestigationRequest,
-  InitInvestigationResponse,
-  PlanInvestigationRequest,
-  PlanInvestigationResponse,
+import {
+  defaultWorkflowRetryPolicy,
+  defaultWorkflowTimeoutPolicy,
+  type EvaluateInvestigationRequest,
+  type EvaluateInvestigationResponse,
+  type ExecuteInvestigationRequest,
+  type ExecuteInvestigationResponse,
+  type FinalizeInvestigationRequest,
+  type FinalizeInvestigationResponse,
+  type InitInvestigationRequest,
+  type InitInvestigationResponse,
+  type PlanInvestigationRequest,
+  type PlanInvestigationResponse,
+  type WorkflowControl,
+  type WorkflowRequestContext,
+  type WorkflowResponseMetadata,
 } from '@investigation-ai/workflow-contracts';
 
 const config = loadConfig(process.env, 3002);
@@ -50,7 +56,10 @@ const adk = createInvestigationAdk('gemini-2.5-pro');
 const validateInit = (input: unknown): InitInvestigationRequest => {
   const payload = asObject(input);
   const incident = asObject(payload.incident);
-  return { incident: { id: asString(incident.id, 'incident.id') } as Incident };
+  return {
+    context: validateWorkflowContext(payload.context),
+    incident: { id: asString(incident.id, 'incident.id') } as Incident,
+  };
 };
 
 const validatePlan = (input: unknown): PlanInvestigationRequest => {
@@ -65,14 +74,18 @@ const validatePlan = (input: unknown): PlanInvestigationRequest => {
     throw new Error('maxSteps must be a positive integer');
   }
   return {
+    context: validateWorkflowContext(payload.context),
     incidentId: asString(payload.incidentId, 'incidentId'),
-    maxSteps: rawMaxSteps as number | undefined,
+    ...(rawMaxSteps === undefined
+      ? {}
+      : { maxSteps: rawMaxSteps as number }),
   };
 };
 
 const validateExecute = (input: unknown): ExecuteInvestigationRequest => {
   const payload = asObject(input);
   return {
+    context: validateWorkflowContext(payload.context),
     incidentId: asString(payload.incidentId, 'incidentId'),
     stepIds: asStringArray(payload.stepIds ?? [], 'stepIds'),
   };
@@ -81,6 +94,7 @@ const validateExecute = (input: unknown): ExecuteInvestigationRequest => {
 const validateEvaluate = (input: unknown): EvaluateInvestigationRequest => {
   const payload = asObject(input);
   return {
+    context: validateWorkflowContext(payload.context),
     incidentId: asString(payload.incidentId, 'incidentId'),
     evidenceIds: asStringArray(payload.evidenceIds ?? [], 'evidenceIds'),
   };
@@ -88,8 +102,62 @@ const validateEvaluate = (input: unknown): EvaluateInvestigationRequest => {
 
 const validateFinalize = (input: unknown): FinalizeInvestigationRequest => {
   const payload = asObject(input);
-  return { incidentId: asString(payload.incidentId, 'incidentId') };
+  return {
+    context: validateWorkflowContext(payload.context),
+    incidentId: asString(payload.incidentId, 'incidentId'),
+  };
 };
+
+
+const validateWorkflowContext = (input: unknown): WorkflowRequestContext => {
+  const context = asObject(input);
+  const attempt = context.attempt ?? 1;
+  if (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt <= 0) {
+    throw new Error('context.attempt must be a positive integer');
+  }
+  return {
+    requestId: asString(context.requestId, 'context.requestId'),
+    workflowExecutionId: asString(
+      context.workflowExecutionId,
+      'context.workflowExecutionId',
+    ),
+    correlationId: asString(context.correlationId, 'context.correlationId'),
+    idempotencyKey: asString(context.idempotencyKey, 'context.idempotencyKey'),
+    attempt,
+    requestedAt: asString(context.requestedAt, 'context.requestedAt'),
+    deadlineAt: asString(context.deadlineAt, 'context.deadlineAt'),
+  };
+};
+
+const buildControl = (
+  context: WorkflowRequestContext,
+  values: Pick<
+    WorkflowControl,
+    'status' | 'nextPhase' | 'reason' | 'terminalState' | 'partialFailure'
+  >,
+): WorkflowControl => ({
+  status: values.status,
+  nextPhase: values.nextPhase,
+  reason: values.reason,
+  retryPolicy: defaultWorkflowRetryPolicy,
+  timeoutPolicy: defaultWorkflowTimeoutPolicy,
+  idempotency: {
+    key: context.idempotencyKey,
+    scope: 'phase',
+    replayed: false,
+  },
+  ...(values.terminalState ? { terminalState: values.terminalState } : {}),
+  ...(values.partialFailure ? { partialFailure: values.partialFailure } : {}),
+});
+
+const buildMetadata = (
+  context: WorkflowRequestContext,
+): WorkflowResponseMetadata => ({
+  requestId: context.requestId,
+  workflowExecutionId: context.workflowExecutionId,
+  correlationId: context.correlationId,
+  generatedAt: new Date().toISOString(),
+});
 
 const createDefaultPlan = (incidentId: string, maxSteps = 3): PlanStep[] =>
   [
@@ -98,7 +166,7 @@ const createDefaultPlan = (incidentId: string, maxSteps = 3): PlanStep[] =>
       title: 'Collect incident context',
       objective: 'Gather baseline metadata and recent changes.',
       rationale: 'Deterministic bootstrap step before tool integrations exist.',
-      status: 'ready',
+      status: 'ready' as const,
       dependsOn: [],
       toolRequestIds: [],
       targetEntityIds: [],
@@ -109,7 +177,7 @@ const createDefaultPlan = (incidentId: string, maxSteps = 3): PlanStep[] =>
       title: 'Review current signals',
       objective: 'Summarize known evidence and open questions.',
       rationale: 'Creates a stable handoff point for execution.',
-      status: 'pending',
+      status: 'pending' as const,
       dependsOn: [`${incidentId}-collect-context`],
       toolRequestIds: [],
       targetEntityIds: [],
@@ -120,7 +188,7 @@ const createDefaultPlan = (incidentId: string, maxSteps = 3): PlanStep[] =>
       title: 'Prepare report draft',
       objective: 'Convert findings into a draft conclusion.',
       rationale: 'Ensures finalize has deterministic inputs.',
-      status: 'pending',
+      status: 'pending' as const,
       dependsOn: [`${incidentId}-review-signals`],
       toolRequestIds: [],
       targetEntityIds: [],
@@ -336,9 +404,11 @@ const loadState = async (
     lastSignals: Array.isArray(record.lastSignals)
       ? (record.lastSignals as InvestigationState['lastSignals'])
       : [],
-    stopCondition: metadata.stopCondition as
-      | InvestigationState['stopCondition']
-      | undefined,
+    ...(metadata.stopCondition
+      ? {
+          stopCondition: metadata.stopCondition as InvestigationState['stopCondition'],
+        }
+      : {}),
     metadata: metadata as InvestigationState['metadata'],
     updatedAt: record.updatedAt.toISOString(),
   };
@@ -361,7 +431,7 @@ const saveState = async (state: InvestigationState): Promise<void> => {
       steps: state.steps,
       lastToolResults: state.lastToolResults,
       stopCondition: state.stopCondition ?? null,
-    },
+    } as JsonObject,
     updatedAt: new Date(),
   };
   if (existing) {
@@ -388,7 +458,8 @@ createService(
       path: '/init',
       validate: validateInit,
       handler: async ({ body, res }) => {
-        const incident = await loadIncident(body.incident.id!);
+        const request = body as InitInvestigationRequest;
+        const incident = await loadIncident(request.incident.id!);
         const state: InvestigationState = {
           incidentId: incident.id!,
           status: 'running',
@@ -411,7 +482,12 @@ createService(
           phase: 'init',
           incidentId: incident.id!,
           state,
-          next: '/plan',
+          control: buildControl(request.context, {
+            status: 'continue',
+            nextPhase: '/plan',
+            reason: 'Investigation state initialized successfully.',
+          }),
+          metadata: buildMetadata(request.context),
         };
         sendJson(res, 200, response);
       },
@@ -421,8 +497,9 @@ createService(
       path: '/plan',
       validate: validatePlan,
       handler: async ({ body, res }) => {
-        const state = (await loadState(body.incidentId)) ?? {
-          incidentId: body.incidentId,
+        const request = body as PlanInvestigationRequest;
+        const state = (await loadState(request.incidentId)) ?? {
+          incidentId: request.incidentId,
           status: 'running',
           iterationCount: 0,
           stagnationCount: 0,
@@ -435,16 +512,24 @@ createService(
           metadata: {},
           updatedAt: new Date().toISOString(),
         };
-        state.plan = createDefaultPlan(body.incidentId, body.maxSteps ?? 3);
+        state.plan = createDefaultPlan(request.incidentId, request.maxSteps ?? 3);
         state.iterationCount += 1;
         state.updatedAt = new Date().toISOString();
         await saveState(state);
         const response: PlanInvestigationResponse = {
           phase: 'plan',
-          incidentId: body.incidentId,
+          incidentId: request.incidentId,
           state,
           steps: state.plan,
-          next: '/execute',
+          control: buildControl(request.context, {
+            status: state.plan.length > 0 ? 'continue' : 'stop',
+            nextPhase: state.plan.length > 0 ? '/execute' : '/finalize',
+            reason:
+              state.plan.length > 0
+                ? 'Plan generated successfully.'
+                : 'No executable steps remain.',
+          }),
+          metadata: buildMetadata(request.context),
         };
         sendJson(res, 200, response);
       },
@@ -454,15 +539,16 @@ createService(
       path: '/execute',
       validate: validateExecute,
       handler: async ({ body, res }) => {
-        const state = await loadState(body.incidentId);
+        const request = body as ExecuteInvestigationRequest;
+        const state = await loadState(request.incidentId);
         if (!state) {
           throw new Error(
-            `Investigation state for ${body.incidentId} not found`,
+            `Investigation state for ${request.incidentId} not found`,
           );
         }
-        state.steps = body.stepIds.map((stepId, index) => ({
+        state.steps = request.stepIds.map((stepId, index) => ({
           id: `${stepId}-execution`,
-          incidentId: body.incidentId,
+          incidentId: request.incidentId,
           stepIndex: index,
           type: 'reasoning',
           status: 'success',
@@ -476,11 +562,11 @@ createService(
 
         await database.client
           .delete(steps)
-          .where(eq(steps.incidentId, body.incidentId));
+          .where(eq(steps.incidentId, request.incidentId));
         if (state.steps.length > 0) {
           await database.client.insert(steps).values(
             state.steps.map((step) => ({
-              incidentId: body.incidentId,
+              incidentId: request.incidentId,
               stepIndex: step.stepIndex,
               type: step.type,
               status: 'success',
@@ -493,10 +579,30 @@ createService(
         }
         const response: ExecuteInvestigationResponse = {
           phase: 'execute',
-          incidentId: body.incidentId,
+          incidentId: request.incidentId,
           state,
-          executedStepIds: body.stepIds,
-          next: '/evaluate',
+          executedStepIds: request.stepIds,
+          control: buildControl(request.context, {
+            status: 'continue',
+            nextPhase: '/evaluate',
+            reason: 'Execution completed and results are ready for evaluation.',
+            partialFailure:
+              request.stepIds.length === 0
+                ? {
+                    affectedStepIds: [],
+                    failedDependencyCount: 0,
+                    handling: 'degraded_continue',
+                    warnings: [
+                      {
+                        code: 'NO_STEPS_EXECUTED',
+                        message: 'No step ids were supplied; evaluation will run with deterministic fallback behavior.',
+                        retryable: false,
+                      },
+                    ],
+                  }
+                : undefined,
+          }),
+          metadata: buildMetadata(request.context),
         };
         sendJson(res, 200, response);
       },
@@ -506,19 +612,20 @@ createService(
       path: '/evaluate',
       validate: validateEvaluate,
       handler: async ({ body, res }) => {
-        const state = await loadState(body.incidentId);
+        const request = body as EvaluateInvestigationRequest;
+        const state = await loadState(request.incidentId);
         if (!state) {
           throw new Error(
-            `Investigation state for ${body.incidentId} not found`,
+            `Investigation state for ${request.incidentId} not found`,
           );
         }
 
-        const deterministicSummary = `Evaluation completed for ${body.evidenceIds.length} evidence identifiers.`;
+        const deterministicSummary = `Evaluation completed for ${request.evidenceIds.length} evidence identifiers.`;
         const summaryResult = await adk.summarize({
-          incidentId: body.incidentId,
-          incidentTitle: body.incidentId,
+          incidentId: request.incidentId,
+          incidentTitle: request.incidentId,
           findings: state.steps.map((step) => step.summary),
-          evidenceIds: body.evidenceIds,
+          evidenceIds: request.evidenceIds,
           maxBullets: 3,
         });
         const summary = validateSummaryOutput(
@@ -527,7 +634,7 @@ createService(
         );
 
         const hypothesisResult = await adk.generateHypotheses({
-          incidentId: body.incidentId,
+          incidentId: request.incidentId,
           incidentSummary: summary.summary,
           findingSummaries: state.steps.map((step) => step.summary),
           maxHypotheses: 3,
@@ -535,17 +642,17 @@ createService(
         const hypotheses = validateHypothesesOutput(hypothesisResult.output);
 
         const fallbackSignalResult = await adk.extractFallbackSignals({
-          incidentId: body.incidentId,
-          rawSignals: body.evidenceIds,
+          incidentId: request.incidentId,
+          rawSignals: request.evidenceIds,
           knownEntityIds: state.entities.map((entity) => entity.id),
           maxSignals: 5,
         });
         const validatedSignalExtraction = validateFallbackSignalsOutput(
           fallbackSignalResult.output,
-          body.evidenceIds,
+          request.evidenceIds,
         );
         const deterministicSignals = buildDeterministicSignals(
-          body.evidenceIds,
+          request.evidenceIds,
         );
         state.lastSignals =
           validatedSignalExtraction.signals.length > 0
@@ -555,13 +662,13 @@ createService(
         state.findings = [
           {
             summary: summary.summary,
-            confidence: body.evidenceIds.length > 0 ? 0.7 : 0.4,
+            confidence: request.evidenceIds.length > 0 ? 0.7 : 0.4,
             hypothesis: hypotheses.hypotheses[0]?.hypothesis,
             entities: [],
             evidenceRefs: [],
             structuredSignals: state.lastSignals,
             metadata: {
-              evidenceIds: body.evidenceIds,
+              evidenceIds: request.evidenceIds,
               llm: {
                 summarizationOk: summaryResult.ok,
                 hypothesisGenerationOk: hypothesisResult.ok,
@@ -575,7 +682,7 @@ createService(
           },
         ];
         state.stagnationCount =
-          body.evidenceIds.length === 0 ? state.stagnationCount + 1 : 0;
+          request.evidenceIds.length === 0 ? state.stagnationCount + 1 : 0;
         state.stopCondition = {
           shouldStop: false,
           reason:
@@ -592,13 +699,39 @@ createService(
         await saveState(state);
         const response: EvaluateInvestigationResponse = {
           phase: 'evaluate',
-          incidentId: body.incidentId,
+          incidentId: request.incidentId,
           state,
           findingsSummary: {
             count: state.findings.length,
             summaries: state.findings.map((finding) => finding.summary),
           },
-          next: '/finalize',
+          control: buildControl(request.context, {
+            status: state.iterationCount >= 2 || state.findings.length > 0 ? 'stop' : 'continue',
+            nextPhase:
+              state.iterationCount >= 2 || state.findings.length > 0
+                ? '/finalize'
+                : '/plan',
+            reason:
+              state.iterationCount >= 2 || state.findings.length > 0
+                ? 'Engine-controlled stop condition satisfied.'
+                : 'Another planning iteration is required.',
+            partialFailure:
+              request.evidenceIds.length === 0
+                ? {
+                    affectedStepIds: [],
+                    failedDependencyCount: 0,
+                    handling: 'degraded_continue',
+                    warnings: [
+                      {
+                        code: 'NO_EVIDENCE_IDS',
+                        message: 'Evaluation proceeded with fallback signals because no evidence ids were supplied.',
+                        retryable: false,
+                      },
+                    ],
+                  }
+                : undefined,
+          }),
+          metadata: buildMetadata(request.context),
         };
         sendJson(res, 200, response);
       },
@@ -608,13 +741,14 @@ createService(
       path: '/finalize',
       validate: validateFinalize,
       handler: async ({ body, res }) => {
+        const request = body as FinalizeInvestigationRequest;
         const [state, incident] = await Promise.all([
-          loadState(body.incidentId),
-          loadIncident(body.incidentId),
+          loadState(request.incidentId),
+          loadIncident(request.incidentId),
         ]);
         if (!state) {
           throw new Error(
-            `Investigation state for ${body.incidentId} not found`,
+            `Investigation state for ${request.incidentId} not found`,
           );
         }
 
@@ -622,7 +756,7 @@ createService(
           state.findings[0]?.summary ??
           `Investigation finalized for ${incident.title}.`;
         const finalDraftResult = await adk.draftFinalReport({
-          incidentId: body.incidentId,
+          incidentId: request.incidentId,
           incidentTitle: incident.title,
           summary: deterministicSummary,
           hypotheses: state.findings
@@ -647,7 +781,7 @@ createService(
         await saveState(state);
 
         const report: FinalReport = {
-          incidentId: body.incidentId,
+          incidentId: request.incidentId,
           summary: finalDraft.summary,
           conclusion: finalDraft.conclusion,
           status:
@@ -666,10 +800,17 @@ createService(
         };
         const response: FinalizeInvestigationResponse = {
           phase: 'finalize',
-          incidentId: body.incidentId,
+          incidentId: request.incidentId,
           report,
           state,
           completed: true,
+          control: buildControl(request.context, {
+            status: 'stop',
+            nextPhase: null,
+            terminalState: 'completed',
+            reason: 'Final report created successfully.',
+          }),
+          metadata: buildMetadata(request.context),
         };
         sendJson(res, 200, response);
       },
