@@ -6,7 +6,7 @@ import {
   googleSqlDatabaseInstance,
   googleSqlUser,
 } from '@cdktf/provider-google';
-import { ITerraformDependable } from 'cdktf';
+import type { ITerraformDependable } from 'cdktf';
 import { Construct } from 'constructs';
 
 export interface DatabaseConstructProps {
@@ -21,9 +21,14 @@ export interface DatabaseConstructProps {
 
 export class AlloyDbClusterConstruct extends Construct {
   public readonly connectionName: string;
+  public readonly host: string;
+  public readonly port = '5432';
+  public readonly user = 'postgres';
+  public readonly databaseName: string;
 
   public constructor(scope: Construct, id: string, props: DatabaseConstructProps) {
     super(scope, id);
+    this.databaseName = props.databaseName;
 
     const sqlAdminApi = new googleProjectService.GoogleProjectService(this, 'sqlAdminApi', {
       project: props.projectId,
@@ -64,6 +69,7 @@ export class AlloyDbClusterConstruct extends Construct {
       });
 
       this.connectionName = primary.name;
+      this.host = primary.ipAddress;
       return;
     }
 
@@ -104,5 +110,6 @@ export class AlloyDbClusterConstruct extends Construct {
     });
 
     this.connectionName = instance.connectionName;
+    this.host = instance.privateIpAddress;
   }
 }

@@ -5,14 +5,14 @@ import {
   googleSecretManagerSecretIamMember,
 } from '@cdktf/provider-google';
 import { TerraformOutput, TerraformStack } from 'cdktf';
-import { Construct } from 'constructs';
+import type { Construct } from 'constructs';
 import { AlloyDbClusterConstruct } from '../constructs/alloydb-cluster.js';
 import { CloudRunServiceConstruct } from '../constructs/cloud-run-service.js';
 import { ServiceAccountConstruct } from '../constructs/service-account.js';
 import { StorageBucketConstruct } from '../constructs/storage-bucket.js';
 import { VpcConnectorConstruct } from '../constructs/vpc-connector.js';
 import { WorkflowConstruct } from '../constructs/workflow.js';
-import { EnvironmentConfig } from '../config/environments.js';
+import type { EnvironmentConfig } from '../config/environments.js';
 
 export class PlatformStack extends TerraformStack {
   public constructor(scope: Construct, id: string, config: EnvironmentConfig) {
@@ -38,14 +38,19 @@ export class PlatformStack extends TerraformStack {
       projectId: config.projectId,
       accountId: `${config.environment}-workflow`,
       displayName: `${config.environment} workflow runtime`,
-      projectRoles: ['roles/workflows.invoker', 'roles/logging.logWriter'],
+      projectRoles: ['roles/logging.logWriter'],
     });
 
     const intakeServiceAccount = new ServiceAccountConstruct(this, 'intakeSa', {
       projectId: config.projectId,
       accountId: `${config.environment}-intake`,
       displayName: `${config.environment} intake service`,
-      projectRoles: ['roles/run.invoker', 'roles/storage.objectAdmin', 'roles/secretmanager.secretAccessor'],
+      projectRoles: [
+        'roles/run.invoker',
+        'roles/storage.objectAdmin',
+        'roles/secretmanager.secretAccessor',
+        'roles/workflows.invoker',
+      ],
     });
 
     const engineServiceAccount = new ServiceAccountConstruct(this, 'engineSa', {
@@ -152,13 +157,22 @@ export class PlatformStack extends TerraformStack {
       allowUnauthenticated: true,
       environmentVariables: {
         ENVIRONMENT: config.environment,
+        DATABASE_CONNECTION_MODE: 'host',
+        DATABASE_HOST: database.host,
+        DATABASE_PORT: database.port,
+        DATABASE_NAME: database.databaseName,
+        DATABASE_USER: database.user,
+        DATABASE_SSL_MODE: 'disable',
         REPORTS_BUCKET: reportsBucket.bucket.name,
         TOOL_OUTPUTS_BUCKET: toolOutputsBucket.bucket.name,
         KNOWLEDGE_BASE_BUCKET: knowledgeBaseBucket.bucket.name,
         WORKFLOW_NAME: `${config.environment}-investigation-workflow`,
-        PUBSUB_TOPIC: intakeTopic?.name ?? '',
+        ...(intakeTopic ? { PUBSUB_TOPIC: intakeTopic.name } : {}),
       },
-      secretEnvironmentVariables: [{ name: 'TOOLING_API_KEY', secretId: apiKeySecret.secretId }],
+      secretEnvironmentVariables: [
+        { name: 'DATABASE_PASSWORD', secretId: databasePasswordSecret.secretId },
+        { name: 'TOOLING_API_KEY', secretId: apiKeySecret.secretId },
+      ],
     });
 
     const investigationEngine = new CloudRunServiceConstruct(this, 'investigationEngine', {
@@ -168,14 +182,24 @@ export class PlatformStack extends TerraformStack {
       image: config.cloudRunImages.investigationEngine,
       serviceAccountEmail: engineServiceAccount.account.email,
       connectorId: vpc.connector.id,
+      ingress: 'INGRESS_TRAFFIC_ALL',
+      invokerMembers: [`serviceAccount:${workflowServiceAccount.account.email}`],
       environmentVariables: {
         ENVIRONMENT: config.environment,
-        DATABASE_CONNECTION_NAME: database.connectionName,
+        DATABASE_CONNECTION_MODE: 'host',
+        DATABASE_HOST: database.host,
+        DATABASE_PORT: database.port,
+        DATABASE_NAME: database.databaseName,
+        DATABASE_USER: database.user,
+        DATABASE_SSL_MODE: 'disable',
         TOOL_OUTPUTS_BUCKET: toolOutputsBucket.bucket.name,
         REPORTS_BUCKET: reportsBucket.bucket.name,
-        EXECUTION_TOPIC: executionTopic?.name ?? '',
+        ...(executionTopic ? { EXECUTION_TOPIC: executionTopic.name } : {}),
       },
-      secretEnvironmentVariables: [{ name: 'DATABASE_PASSWORD_SECRET', secretId: databasePasswordSecret.secretId }],
+      secretEnvironmentVariables: [
+        { name: 'DATABASE_PASSWORD', secretId: databasePasswordSecret.secretId },
+        { name: 'TOOLING_API_KEY', secretId: apiKeySecret.secretId },
+      ],
     });
 
     const workflow = new WorkflowConstruct(this, 'investigationWorkflow', {
@@ -185,7 +209,6 @@ export class PlatformStack extends TerraformStack {
       serviceAccountEmail: workflowServiceAccount.account.email,
       sourcePath: config.workflowSourcePath,
       substitutions: {
-        intake_service_url: intakeService.service.uri,
         investigation_engine_url: investigationEngine.service.uri,
       },
     });
