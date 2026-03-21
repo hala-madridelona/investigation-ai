@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 
-import { createDatabaseClient, incidents } from '@investigation-ai/db';
+import { createDatabaseClientFromEnv, incidents } from '@investigation-ai/db';
 import {
   asObject,
   asOptionalString,
@@ -28,10 +28,7 @@ import {
 } from '@investigation-ai/workflow-contracts';
 
 const config = loadConfig(process.env, 3001);
-const database = createDatabaseClient({
-  connectionString: config.DATABASE_URL,
-  ssl: config.DATABASE_SSL ? 'require' : undefined,
-});
+const database = createDatabaseClientFromEnv(process.env);
 
 const validateIntakeWebhook = (input: unknown): IntakeWebhookRequest => {
   const payload = asObject(input);
