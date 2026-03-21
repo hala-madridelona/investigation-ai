@@ -8,7 +8,9 @@ import {
   createRecordMetadata,
   createService,
   loadConfig,
+  RequestValidationError,
   sendJson,
+  type Route,
 } from '@investigation-ai/service-runtime';
 import {
   incidentStatuses,
@@ -33,34 +35,54 @@ const database = createDatabaseClientFromEnv(process.env);
 const validateIntakeWebhook = (input: unknown): IntakeWebhookRequest => {
   const payload = asObject(input);
   const incidentInput = asObject(payload.incident);
-  const severity = asString(incidentInput.severity, 'incident.severity') as Incident['severity'];
-  const status = (incidentInput.status === undefined ? 'pending' : asString(incidentInput.status, 'incident.status')) as Incident['status'];
+  const severity = asString(
+    incidentInput.severity,
+    'incident.severity',
+  ) as Incident['severity'];
+  const status = (
+    incidentInput.status === undefined
+      ? 'pending'
+      : asString(incidentInput.status, 'incident.status')
+  ) as Incident['status'];
 
   if (!severities.includes(severity)) {
-    throw new Error('incident.severity must be one of critical, high, medium, low');
+    throw new RequestValidationError(
+      'incident.severity must be one of critical, high, medium, low',
+    );
   }
   if (!incidentStatuses.includes(status)) {
-    throw new Error('incident.status must be one of pending, running, completed, failed');
+    throw new RequestValidationError(
+      'incident.status must be one of pending, running, completed, failed',
+    );
   }
 
   return {
     source: asString(payload.source, 'source') as 'pagerduty',
     dedupKey: asOptionalString(payload.dedupKey, 'dedupKey'),
     occurredAt: asOptionalString(payload.occurredAt, 'occurredAt'),
-    payload: payload.payload && typeof payload.payload === 'object' && !Array.isArray(payload.payload)
-      ? (payload.payload as JsonObject)
-      : undefined,
+    payload:
+      payload.payload &&
+      typeof payload.payload === 'object' &&
+      !Array.isArray(payload.payload)
+        ? (payload.payload as JsonObject)
+        : undefined,
     incident: {
       id: asString(incidentInput.id, 'incident.id'),
-      externalId: asOptionalString(incidentInput.externalId, 'incident.externalId'),
+      externalId: asOptionalString(
+        incidentInput.externalId,
+        'incident.externalId',
+      ),
       title: asString(incidentInput.title, 'incident.title'),
       status,
       severity,
       serviceName: asString(incidentInput.serviceName, 'incident.serviceName'),
       summary: asOptionalString(incidentInput.summary, 'incident.summary'),
-      payload: incidentInput.payload && typeof incidentInput.payload === 'object' && !Array.isArray(incidentInput.payload)
-        ? (incidentInput.payload as JsonObject)
-        : {},
+      payload:
+        incidentInput.payload &&
+        typeof incidentInput.payload === 'object' &&
+        !Array.isArray(incidentInput.payload)
+          ? (incidentInput.payload as JsonObject)
+          : {},
       entities: [],
     },
   };
@@ -84,7 +106,10 @@ const normalizeIncident = (payload: IntakeWebhookRequest): Incident => ({
   entities: payload.incident.entities ?? [],
 });
 
-const buildWorkflowTrigger = (incidentId: string, dedupKey?: string): WorkflowTrigger => ({
+const buildWorkflowTrigger = (
+  incidentId: string,
+  dedupKey?: string,
+): WorkflowTrigger => ({
   workflow: 'investigation',
   action: 'start',
   incidentId,
@@ -113,14 +138,23 @@ const buildWorkflowInput = (
 });
 
 createService(
-  { serviceName: 'intake-service', port: config.PORT, logLevel: config.LOG_LEVEL },
+  {
+    serviceName: 'intake-service',
+    port: config.PORT,
+    logLevel: config.LOG_LEVEL,
+  },
   [
     {
       method: 'POST',
       path: '/webhooks/pagerduty',
       validate: validateIntakeWebhook,
-      handler: async ({ body, res, requestId, logger, observability }) => {
-        const request = body as IntakeWebhookRequest;
+      handler: async ({
+        body: request,
+        res,
+        requestId,
+        logger,
+        observability,
+      }) => {
         const normalized = normalizeIncident(request);
         const incidentMetadata = createRecordMetadata({
           actor: observability.actor,
@@ -129,9 +163,6 @@ createService(
         });
         const requestLogger = logger.child({
           incidentId: normalized.externalId,
-          correlationIds: observability.correlationIds,
-          actor: observability.actor,
-          source: observability.source,
         });
         const existing = await database.client.query.incidents.findFirst({
           where: eq(incidents.externalId, normalized.externalId),
@@ -147,7 +178,10 @@ createService(
                   status: normalized.status,
                   serviceName: normalized.serviceName,
                   payload: normalized.payload,
-                  metadata: incidentMetadata as unknown as Record<string, unknown>,
+                  metadata: incidentMetadata as unknown as Record<
+                    string,
+                    unknown
+                  >,
                   updatedAt: new Date(),
                 })
                 .where(eq(incidents.id, existing.id))
@@ -163,7 +197,10 @@ createService(
                   status: normalized.status,
                   serviceName: normalized.serviceName,
                   payload: normalized.payload,
-                  metadata: incidentMetadata as unknown as Record<string, unknown>,
+                  metadata: incidentMetadata as unknown as Record<
+                    string,
+                    unknown
+                  >,
                 })
                 .returning()
             )[0];
@@ -189,7 +226,13 @@ createService(
         const response: IntakeWebhookResponse = {
           accepted: true,
           incident,
-          workflowInput: buildWorkflowInput(incident, workflowTrigger, requestId, observability.correlationIds, request.dedupKey),
+          workflowInput: buildWorkflowInput(
+            incident,
+            workflowTrigger,
+            requestId,
+            observability.correlationIds,
+            request.dedupKey,
+          ),
           workflowTrigger,
           metadata: {
             receivedAt: new Date().toISOString(),
@@ -201,6 +244,6 @@ createService(
 
         sendJson(res, 202, response);
       },
-    },
+    } satisfies Route<IntakeWebhookRequest>,
   ],
 );

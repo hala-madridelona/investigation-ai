@@ -15,8 +15,11 @@ import {
   asStringArray,
   createRecordMetadata,
   createService,
+  HttpError,
   loadConfig,
+  RequestValidationError,
   sendJson,
+  type Route,
 } from '@investigation-ai/service-runtime';
 import type {
   FallbackSignalExtractionResponse,
@@ -78,7 +81,7 @@ const validatePlan = (input: unknown): PlanInvestigationRequest => {
       !Number.isInteger(rawMaxSteps) ||
       rawMaxSteps <= 0)
   ) {
-    throw new Error('maxSteps must be a positive integer');
+    throw new RequestValidationError('maxSteps must be a positive integer');
   }
   return {
     context: validateWorkflowContext(payload.context),
@@ -121,7 +124,9 @@ const validateWorkflowContext = (input: unknown): WorkflowRequestContext => {
     !Number.isInteger(attempt) ||
     attempt <= 0
   ) {
-    throw new Error('context.attempt must be a positive integer');
+    throw new RequestValidationError(
+      'context.attempt must be a positive integer',
+    );
   }
   return {
     requestId: asString(context.requestId, 'context.requestId'),
@@ -641,7 +646,11 @@ const loadIncident = async (incidentId: string): Promise<Incident> => {
     where: eq(incidents.id, incidentId),
   });
   if (!incident) {
-    throw new Error(`Incident ${incidentId} not found`);
+    throw new HttpError(
+      404,
+      'incident_not_found',
+      `Incident ${incidentId} not found`,
+    );
   }
   return {
     id: incident.id,
@@ -736,8 +745,7 @@ createService(
       method: 'POST',
       path: '/init',
       validate: validateInit,
-      handler: async ({ body, res, logger }) => {
-        const request = body as InitInvestigationRequest;
+      handler: async ({ body: request, res, logger }) => {
         const correlationIds = request.context.correlationIds ?? [
           request.context.correlationId,
         ];
@@ -787,23 +795,24 @@ createService(
         });
         sendJson(res, 200, response);
       },
-    },
+    } satisfies Route<InitInvestigationRequest>,
     {
       method: 'POST',
       path: '/plan',
       validate: validatePlan,
-      handler: async ({ body, res, logger }) => {
-        const request = body as PlanInvestigationRequest;
+      handler: async ({ body: request, res, logger }) => {
         const correlationIds = request.context.correlationIds ?? [
           request.context.correlationId,
         ];
         const requestLogger = logger.child({
-          correlationIds,
           incidentId: request.incidentId,
+          correlationIds,
         });
         const state = await loadState(request.incidentId);
         if (!state) {
-          throw new Error(
+          throw new HttpError(
+            409,
+            'state_not_initialized',
             `Investigation state for ${request.incidentId} must be initialized before planning`,
           );
         }
@@ -839,23 +848,24 @@ createService(
         });
         sendJson(res, 200, response);
       },
-    },
+    } satisfies Route<PlanInvestigationRequest>,
     {
       method: 'POST',
       path: '/execute',
       validate: validateExecute,
-      handler: async ({ body, res, logger }) => {
-        const request = body as ExecuteInvestigationRequest;
+      handler: async ({ body: request, res, logger }) => {
         const correlationIds = request.context.correlationIds ?? [
           request.context.correlationId,
         ];
         const requestLogger = logger.child({
-          correlationIds,
           incidentId: request.incidentId,
+          correlationIds,
         });
         const state = await loadState(request.incidentId);
         if (!state) {
-          throw new Error(
+          throw new HttpError(
+            404,
+            'state_not_found',
             `Investigation state for ${request.incidentId} not found`,
           );
         }
@@ -1031,23 +1041,24 @@ createService(
         });
         sendJson(res, 200, response);
       },
-    },
+    } satisfies Route<ExecuteInvestigationRequest>,
     {
       method: 'POST',
       path: '/evaluate',
       validate: validateEvaluate,
-      handler: async ({ body, res, logger }) => {
-        const request = body as EvaluateInvestigationRequest;
+      handler: async ({ body: request, res, logger }) => {
         const correlationIds = request.context.correlationIds ?? [
           request.context.correlationId,
         ];
         const requestLogger = logger.child({
-          correlationIds,
           incidentId: request.incidentId,
+          correlationIds,
         });
         const state = await loadState(request.incidentId);
         if (!state) {
-          throw new Error(
+          throw new HttpError(
+            404,
+            'state_not_found',
             `Investigation state for ${request.incidentId} not found`,
           );
         }
@@ -1206,26 +1217,27 @@ createService(
         });
         sendJson(res, 200, response);
       },
-    },
+    } satisfies Route<EvaluateInvestigationRequest>,
     {
       method: 'POST',
       path: '/finalize',
       validate: validateFinalize,
-      handler: async ({ body, res, logger }) => {
-        const request = body as FinalizeInvestigationRequest;
+      handler: async ({ body: request, res, logger }) => {
         const correlationIds = request.context.correlationIds ?? [
           request.context.correlationId,
         ];
         const requestLogger = logger.child({
-          correlationIds,
           incidentId: request.incidentId,
+          correlationIds,
         });
         const [state, incident] = await Promise.all([
           loadState(request.incidentId),
           loadIncident(request.incidentId),
         ]);
         if (!state) {
-          throw new Error(
+          throw new HttpError(
+            404,
+            'state_not_found',
             `Investigation state for ${request.incidentId} not found`,
           );
         }
@@ -1306,6 +1318,6 @@ createService(
         });
         sendJson(res, 200, response);
       },
-    },
+    } satisfies Route<FinalizeInvestigationRequest>,
   ],
 );
