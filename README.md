@@ -40,12 +40,14 @@ Monorepo workspace for the Investigation AI platform. The repository is organize
 
 1. Install dependencies with `pnpm install`.
 2. Build shared packages first with `pnpm build` or target a package with `pnpm --filter <name> build`.
-3. Start app-local development with `pnpm --filter @investigation-ai/intake-service dev` or `pnpm --filter @investigation-ai/investigation-engine dev`.
+3. Configure database access for either URL, host/port, or Unix-socket mode as documented in `packages/db/README.md`.
+4. Apply schema migrations with `pnpm --filter @investigation-ai/db db:migrate`.
+5. Start app-local development with `pnpm --filter @investigation-ai/intake-service dev` or `pnpm --filter @investigation-ai/investigation-engine dev`.
 
 ## Next implementation steps
 
 - Add runtime frameworks for the Cloud Run services.
 - Define the first shared schemas and contracts in `packages/shared-types` and `packages/workflow-contracts`.
-- Add Drizzle migrations and environment-specific database configuration in `packages/db`.
+- Expand the migration history in `packages/db/drizzle/` as the schema evolves.
 - Extend `infra/cdktf` with the actual GCP stacks and environments.
 - Capture architecture decision records in `docs/architecture/adrs`.

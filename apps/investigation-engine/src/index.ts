@@ -1,7 +1,7 @@
 import { eq, inArray } from 'drizzle-orm';
 
 import {
-  createDatabaseClient,
+  createDatabaseClientFromEnv,
   incidents,
   investigationState,
   stepArtifacts,
@@ -57,10 +57,7 @@ import {
 } from '@investigation-ai/workflow-contracts';
 
 const config = loadConfig(process.env, 3002);
-const database = createDatabaseClient({
-  connectionString: config.DATABASE_URL,
-  ssl: config.DATABASE_SSL ? 'require' : undefined,
-});
+const database = createDatabaseClientFromEnv(process.env);
 const adk = createInvestigationAdk('gemini-2.5-pro');
 
 const validateInit = (input: unknown): InitInvestigationRequest => {

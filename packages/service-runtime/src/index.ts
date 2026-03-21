@@ -61,15 +61,11 @@ export interface ServiceConfig {
 export interface EnvConfig {
   PORT: number;
   LOG_LEVEL: LogLevel;
-  DATABASE_URL: string;
-  DATABASE_SSL: boolean;
 }
 
 export const loadConfig = (env: NodeJS.ProcessEnv, defaultPort: number): EnvConfig => ({
   PORT: Number(env.PORT ?? defaultPort),
   LOG_LEVEL: parseLogLevel(env.LOG_LEVEL),
-  DATABASE_URL: requiredString(env.DATABASE_URL, 'DATABASE_URL'),
-  DATABASE_SSL: env.DATABASE_SSL === 'true',
 });
 
 const parseLogLevel = (value?: string): LogLevel => {
@@ -77,13 +73,6 @@ const parseLogLevel = (value?: string): LogLevel => {
     return value;
   }
   return 'info';
-};
-
-const requiredString = (value: string | undefined, name: string): string => {
-  if (!value || value.trim().length === 0) {
-    throw new Error(`${name} is required`);
-  }
-  return value;
 };
 
 const dedupe = (values: Array<string | undefined | null>): string[] =>
