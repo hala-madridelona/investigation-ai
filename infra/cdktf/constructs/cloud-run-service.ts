@@ -20,6 +20,7 @@ export interface CloudRunServiceConstructProps {
   }>;
   readonly ingress?: 'INGRESS_TRAFFIC_ALL' | 'INGRESS_TRAFFIC_INTERNAL_ONLY';
   readonly allowUnauthenticated?: boolean;
+  readonly invokerMembers?: readonly string[];
 }
 
 export class CloudRunServiceConstruct extends Construct {
@@ -88,5 +89,15 @@ export class CloudRunServiceConstruct extends Construct {
         member: 'allUsers',
       });
     }
+
+    (props.invokerMembers ?? []).forEach((member, index) => {
+      new googleCloudRunV2ServiceIamMember.GoogleCloudRunV2ServiceIamMember(this, `invoker-member-${index}`, {
+        project: props.projectId,
+        location: props.region,
+        name: this.service.name,
+        role: 'roles/run.invoker',
+        member,
+      });
+    });
   }
 }

@@ -1,11 +1,11 @@
 # Placeholder GCP Workflows definition for Investigation AI orchestration.
-# Replace ${...} values during deployment.
+# Replace __INVESTIGATION_ENGINE_URL__ during deployment.
 main:
   params: [input]
   steps:
     - initialize_context:
         assign:
-          - engine_base_url: ${INVESTIGATION_ENGINE_BASE_URL}
+          - engine_base_url: "__INVESTIGATION_ENGINE_URL__"
           - workflow_input: ${input}
           - incident_id: ${input.incident.id}
           - workflow_execution_id: ${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
@@ -17,17 +17,29 @@ main:
         args:
           url: ${engine_base_url + "/init"}
           timeout: ${request_timeout_seconds}
+          auth:
+            type: OIDC
+            audience: ${engine_base_url}
           body:
             context:
               requestId: ${workflow_input.context.requestId}
               workflowExecutionId: ${workflow_execution_id}
               correlationId: ${workflow_input.context.requestId}
+              correlationIds: ${workflow_input.context.correlationIds}
               idempotencyKey: ${workflow_input.context.idempotencyKey + ":init:1"}
               attempt: 1
               requestedAt: ${workflow_input.trigger.requestedAt}
               deadlineAt: ${time.format(sys.now() + duration("900s"))}
             incident: ${workflow_input.incident}
         result: init_response
+
+    - after_init:
+        switch:
+          - condition: ${init_response.body.control.status == "continue" and init_response.body.control.nextPhase == "/plan"}
+            next: plan_loop
+          - condition: ${init_response.body.control.status == "needs_human_review" and init_response.body.control.nextPhase == null}
+            next: human_review_exit
+        next: contract_violation_exit
 
     - plan_loop:
         steps:
@@ -37,11 +49,15 @@ main:
               args:
                 url: ${engine_base_url + "/plan"}
                 timeout: ${request_timeout_seconds}
+                auth:
+                  type: OIDC
+                  audience: ${engine_base_url}
                 body:
                   context:
                     requestId: ${workflow_input.context.requestId}
                     workflowExecutionId: ${workflow_execution_id}
                     correlationId: ${workflow_input.context.requestId}
+                    correlationIds: ${workflow_input.context.correlationIds}
                     idempotencyKey: ${workflow_input.context.idempotencyKey + ":plan:" + string(init_response.body.state.iterationCount + 1)}
                     attempt: 1
                     requestedAt: ${workflow_input.trigger.requestedAt}
@@ -52,10 +68,13 @@ main:
 
           - after_plan:
               switch:
-                - condition: ${plan_response.body.control.status == "needs_human_review"}
+                - condition: ${plan_response.body.control.status == "needs_human_review" and plan_response.body.control.nextPhase == null}
                   next: human_review_exit
-                - condition: ${plan_response.body.control.status == "stop"}
+                - condition: ${plan_response.body.control.status == "stop" and plan_response.body.control.nextPhase == "/finalize"}
                   next: finalize_call
+                - condition: ${plan_response.body.control.status == "continue" and plan_response.body.control.nextPhase == "/execute"}
+                  next: execute_call
+              next: contract_violation_exit
 
           # Call /execute using the deterministic step ids returned by /plan.
           - execute_call:
@@ -63,11 +82,15 @@ main:
               args:
                 url: ${engine_base_url + "/execute"}
                 timeout: ${request_timeout_seconds}
+                auth:
+                  type: OIDC
+                  audience: ${engine_base_url}
                 body:
                   context:
                     requestId: ${workflow_input.context.requestId}
                     workflowExecutionId: ${workflow_execution_id}
                     correlationId: ${workflow_input.context.requestId}
+                    correlationIds: ${workflow_input.context.correlationIds}
                     idempotencyKey: ${workflow_input.context.idempotencyKey + ":execute:" + string(plan_response.body.state.iterationCount)}
                     attempt: 1
                     requestedAt: ${workflow_input.trigger.requestedAt}
@@ -78,10 +101,13 @@ main:
 
           - after_execute:
               switch:
-                - condition: ${execute_response.body.control.status == "retry"}
+                - condition: ${execute_response.body.control.status == "retry" and execute_response.body.control.nextPhase == "/execute"}
                   next: execute_call
-                - condition: ${execute_response.body.control.status == "needs_human_review"}
+                - condition: ${execute_response.body.control.status == "needs_human_review" and execute_response.body.control.nextPhase == null}
                   next: human_review_exit
+                - condition: ${execute_response.body.control.status == "continue" and execute_response.body.control.nextPhase == "/evaluate"}
+                  next: evaluate_call
+              next: contract_violation_exit
 
           # Call /evaluate. Loop to /plan only when the engine returns control.status == continue.
           - evaluate_call:
@@ -89,11 +115,15 @@ main:
               args:
                 url: ${engine_base_url + "/evaluate"}
                 timeout: ${request_timeout_seconds}
+                auth:
+                  type: OIDC
+                  audience: ${engine_base_url}
                 body:
                   context:
                     requestId: ${workflow_input.context.requestId}
                     workflowExecutionId: ${workflow_execution_id}
                     correlationId: ${workflow_input.context.requestId}
+                    correlationIds: ${workflow_input.context.correlationIds}
                     idempotencyKey: ${workflow_input.context.idempotencyKey + ":evaluate:" + string(plan_response.body.state.iterationCount)}
                     attempt: 1
                     requestedAt: ${workflow_input.trigger.requestedAt}
@@ -104,14 +134,15 @@ main:
 
           - after_evaluate:
               switch:
-                - condition: ${evaluate_response.body.control.status == "continue"}
+                - condition: ${evaluate_response.body.control.status == "continue" and evaluate_response.body.control.nextPhase == "/plan"}
                   next: plan_loop
-                - condition: ${evaluate_response.body.control.status == "retry"}
+                - condition: ${evaluate_response.body.control.status == "retry" and evaluate_response.body.control.nextPhase == "/evaluate"}
                   next: evaluate_call
-                - condition: ${evaluate_response.body.control.status == "needs_human_review"}
+                - condition: ${evaluate_response.body.control.status == "needs_human_review" and evaluate_response.body.control.nextPhase == null}
                   next: human_review_exit
-                - condition: ${evaluate_response.body.control.status == "stop"}
+                - condition: ${evaluate_response.body.control.status == "stop" and evaluate_response.body.control.nextPhase == "/finalize"}
                   next: finalize_call
+              next: contract_violation_exit
 
     # Call /finalize only after the engine has already decided to stop.
     - finalize_call:
@@ -119,17 +150,29 @@ main:
         args:
           url: ${engine_base_url + "/finalize"}
           timeout: ${request_timeout_seconds}
+          auth:
+            type: OIDC
+            audience: ${engine_base_url}
           body:
             context:
               requestId: ${workflow_input.context.requestId}
               workflowExecutionId: ${workflow_execution_id}
               correlationId: ${workflow_input.context.requestId}
+              correlationIds: ${workflow_input.context.correlationIds}
               idempotencyKey: ${workflow_input.context.idempotencyKey + ":finalize:1"}
               attempt: 1
               requestedAt: ${workflow_input.trigger.requestedAt}
               deadlineAt: ${time.format(sys.now() + duration("900s"))}
             incidentId: ${incident_id}
         result: finalize_response
+
+    - after_finalize:
+        switch:
+          - condition: ${finalize_response.body.control.status == "stop" and finalize_response.body.control.nextPhase == null and finalize_response.body.phase == "finalize"}
+            next: return_success
+          - condition: ${finalize_response.body.control.status == "needs_human_review" and finalize_response.body.control.nextPhase == null}
+            next: human_review_exit
+        next: contract_violation_exit
 
     - return_success:
         return: ${finalize_response.body}
@@ -139,3 +182,9 @@ main:
           incidentId: ${incident_id}
           terminalState: needs_human_review
           reason: Manual intervention required by engine control response.
+
+    - contract_violation_exit:
+        return:
+          incidentId: ${incident_id}
+          terminalState: failed
+          reason: Workflow response did not match the published workflow contract.

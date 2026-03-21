@@ -26,10 +26,10 @@ export class WorkflowConstruct extends Construct {
 
     const source = readFileSync(resolve(process.cwd(), props.sourcePath), 'utf8');
     const substitutions = props.substitutions ?? {};
-    const renderedSource = Object.entries(substitutions).reduce(
-      (accumulator, [key, value]) => accumulator.replaceAll(`$${key}`, value),
-      source,
-    );
+    const renderedSource = Object.entries(substitutions).reduce((accumulator, [key, value]) => {
+      const normalizedKey = key.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+      return accumulator.replaceAll(`__${normalizedKey}__`, value);
+    }, source);
 
     this.workflow = new googleWorkflowsWorkflow.GoogleWorkflowsWorkflow(this, 'workflow', {
       project: props.projectId,
